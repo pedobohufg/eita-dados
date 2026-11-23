@@ -27,6 +27,7 @@
     if (m) { const d = new Date(Date.UTC(+m[3], +m[2] - 1, +m[1])); return isNaN(d) ? null : d.toISOString().slice(0, 10); }
     const d = new Date(s); return isNaN(d) ? null : d.toISOString().slice(0, 10);
   };
+  D.parseDate = parseDate;
   const years = (a, b) => (Date.parse(b) - Date.parse(a)) / (365.25 * 864e5);
   const hash6 = s => String(s).replace(/-/g, "").slice(0, 6).toUpperCase();
 
@@ -76,7 +77,7 @@
         const slug = f.name.replace(/\.json$/i, "").replace(/^.*\//, "");
         const ord = (slug.match(/form-(\d+)/) || [0, 99])[1];
         const known = I.FORMS.find(k => k.re.test(slug));
-        forms.push({ slug, ord: +ord, nome: f.planilha || (known ? known.nome : slug.replace(/^form-\d+__/, "").replace(/[-_]+/g, " ")), unidade: known ? known.unidade : (f.planilha ? "registros" : undefined), planilha: f.planilha || null, records: j.data });
+        forms.push({ slug, ord: +ord, nome: f.planilha || (known ? known.nome : slug.replace(/^form-\d+__/, "").replace(/[-_]+/g, " ")), unidade: known ? known.unidade : (f.planilha ? "registros" : undefined), planilha: f.planilha || null, interesse: !!f.interesse, records: j.data });
       } else if (j && j.data && j.data.project) defs.push(j.data.project); // definição do projeto
       else if (j && j.project && j.project.forms) defs.push(j.project);
     }
@@ -227,7 +228,7 @@
         const label = known.label || (fromDef ? fromDef : tidy(k.replace(/^\d+_/, "").replace(/_/g, " ")));
         const piiGuess = !I.F[k] && D.pareceIdentificacao(label);
         if (piiGuess && type === "text" && vals.some(v => typeof v === "string" && /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(v.trim()))) type = "date";
-        const meta = addVar(k, { label, fullQuestion: fromDef || null, section: known.section || f.nome, type, form: f.nome, formSlug: f.slug, source: f.planilha ? "Planilha" : "Epicollect", pii: !!known.pii || piiGuess, hide: !!known.hide, unit: known.unit || "", raw: true, key: k });
+        const meta = addVar(k, { label, fullQuestion: fromDef || null, section: known.section || f.nome, type, form: f.nome, formSlug: f.slug, source: f.planilha ? "Planilha" : "Epicollect", pii: !!known.pii || piiGuess, hide: !!known.hide, unit: known.unit || "", raw: true, key: k, desc: known.desc || undefined });
         if (type === "cat") meta.levelsOrder = known.order || null; if (opts.types && opts.types[k]) meta.typeOverride = true;
         if (type === "cat" || type === "multi") {
           const flat = type === "multi" ? vals.flatMap(v => Array.isArray(v) ? v : (v ? [v] : [])) : vals.filter(v => typeof v === "string");
@@ -299,7 +300,7 @@
     const MUN = opts.munNames || [], UFS = opts.ufs || [];
     const munByKey = new Map(MUN.map(n => [D.key(n), n]));
     const cleanMun = x => String(x).replace(/\s*[-\/(,].*$/, "").trim();
-    const munField = Object.values(vars).find(v => v.raw && !v.pii && (v.type === "cat" || v.type === "text") && tables.part.vars.includes(v.id) && !/estado|^uf$/i.test(v.label) && (() => {
+    const munField = Object.values(vars).find(v => v.raw && !v.pii && !v.hide && (v.type === "cat" || v.type === "text") && tables.part.vars.includes(v.id) && !/estado|^uf$/i.test(v.label) && (() => {
       const vals = part.map(r => r[v.id]).filter(Boolean); const ok = vals.filter(x => { const k = D.key(cleanMun(x)); return k !== "goias" && munByKey.has(k); }).length; return vals.length >= 5 && ok >= vals.length * 0.6 && new Set(vals).size >= 3; })());
     const manual = opts.municipios || {};
     der("d_municipio", { label: "Município de residência", type: "cat", section: "Responsável e contexto",
@@ -313,7 +314,7 @@
       });
     D.munField = munField ? munField.id : null;
     const ufByKey = new Map(); UFS.forEach(u => { ufByKey.set(D.key(u.n), u.n); ufByKey.set(D.key(u.c), u.n); });
-    const stateField = Object.keys(vars).find(k => /^\d+_Estado$/.test(k));
+    const stateField = Object.keys(vars).find(k => /^\d+_Estado$/.test(k)) || Object.keys(vars).find(k => vars[k].raw && /^estado\b/i.test(vars[k].label) && tables.part.vars.includes(k));
     der("d_uf", { label: "Estado de residência", type: "cat", section: "Responsável e contexto", desc: "Pergunta \"Estado\" da ficha, padronizada; quando vazia e o município é de Goiás, Goiás." }, P, r => {
       const s = stateField ? r[stateField] : null; if (s) { const n = ufByKey.get(D.key(s)); if (n) return n; }
       if (r.d_municipio && munByKey.has(D.key(r.d_municipio))) return "Goiás"; return s || null;
@@ -467,7 +468,7 @@
     Object.values(tables).forEach(t => { if (t.id === "part") return; t.rows.forEach(r => tables.part.vars.forEach(k => { if (!(k in r)) r[k] = r._prow[k]; })); t.partVars = tables.part.vars.slice(); });
 
     // mesma pessoa (nome + nascimento): duplicata (< 30 dias da avaliação anterior) ou reavaliação
-    const nameKey = Object.keys(vars).find(k => /Nome_do_participan/.test(k)), birth = Object.keys(vars).find(k => /^\d+_Data_de_nascimento$/.test(k));
+    const nameKey = Object.keys(vars).find(k => /Nome_do_participan/.test(k) || (I.F[k] && I.F[k].personName)), birth = Object.keys(vars).find(k => /^\d+_Data_de_nascimento$/.test(k) || (I.F[k] && I.F[k].personBirth));
     const pessoas = new Map();
     part.forEach(r => { const k = nameKey && r[nameKey] ? D.key(r[nameKey]) + "|" + (birth ? r[birth] || "" : "") : "id|" + r._uuid; if (!pessoas.has(k)) pessoas.set(k, []); pessoas.get(k).push(r); });
     let nReav = 0;

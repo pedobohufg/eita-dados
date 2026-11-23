@@ -302,7 +302,7 @@
     // ramos (instrumentos)
     const n = st.branches.length; if (n) { const bwB = Math.min(230, (W0 - 20) / n - 12), gap = (W0 - n * bwB) / (n + 1), yb = y + 40, hb = 18 + Math.max(...st.branches.map(b => b.length)) * 15;
       s += `<line x1="${cx}" y1="${y}" x2="${cx}" y2="${y + 20}" stroke="${C.ink}" stroke-width="1.3"/><line x1="${gap + bwB / 2}" y1="${y + 20}" x2="${gap + (n - 1) * (bwB + gap) + bwB / 2}" y2="${y + 20}" stroke="${C.ink}" stroke-width="1.3"/>`;
-      st.branches.forEach((b, i) => { const x = gap + i * (bwB + gap); s += arrow(x + bwB / 2, y + 20, x + bwB / 2, yb); s += box(x, yb, bwB, hb, b, { fill: "#F7F4FF" }); }); y = yb + hb; }
+      st.branches.forEach((b, i) => { const x = n === 1 ? cx - bwB / 2 : gap + i * (bwB + gap); s += arrow(x + bwB / 2, y + 20, x + bwB / 2, yb); s += box(x, yb, bwB, hb, b, { fill: "#F7F4FF" }); }); y = yb + hb; }
     const H0 = y + 10, Wd = Math.max(300, el.clientWidth || 600), sc = Math.min(1.25, Wd / W0);
     el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(W0 * sc)}" height="${Math.round(H0 * sc)}" viewBox="0 0 ${W0} ${H0}" style="font-family:${font2};display:block;margin:0 auto" role="img" aria-label="Fluxograma de participantes"><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="${C.ink}"/></marker></defs>${s}</svg>`;
   };

@@ -9,10 +9,20 @@
   const esc = CH.esc, fmt = CH.fmt, f2 = v => S.fmt(v, 2), fp = S.fmtP;
   const LS = "eita-dados:cfg", DB = "eita-dados", VERSAO = "1.0";
 
-  const st = { raw: [], defs: [], model: null, table: "part", filters: {}, page: "painel", statTab: "descritiva", explore: {}, sel: {}, varCur: null,
-    cfg: { recodes: {}, types: {}, labels: {}, showPII: false, persist: true, pins: [], sep: ";", hidden: [], municipios: {} } };
-  try { Object.assign(st.cfg, JSON.parse(localStorage.getItem(LS) || "{}")); } catch (e) { }
-  const saveCfg = () => { try { localStorage.setItem(LS, JSON.stringify(st.cfg)); } catch (e) { } };
+  // duas seções com bases, filtros e configurações próprias: a manifestação de interesse (formulário público)
+  // e a pesquisa no laboratório (Epicollect). As telas são as mesmas; o painel muda.
+  const SECOES = {
+    interesse: { nome: "Manifestação de interesse", idb: "interesse", ls: LS + ":interesse", cfg: { firstOnly: false } },
+    pesquisa: { nome: "Pesquisa no laboratório", idb: "atual", ls: LS, cfg: {} },
+  };
+  const lerCfg = sec => { const c = Object.assign({ recodes: {}, types: {}, labels: {}, showPII: false, persist: true, pins: [], sep: ";", hidden: [], municipios: {} }, SECOES[sec].cfg); try { Object.assign(c, JSON.parse(localStorage.getItem(SECOES[sec].ls) || "{}")); } catch (e) { } return c; };
+  const estadoVazio = sec => ({ raw: [], defs: [], model: null, table: "part", filters: {}, explore: {}, sel: {}, varCur: null, goMode: null, cfg: lerCfg(sec) });
+  let secIni = "pesquisa"; try { if (SECOES[localStorage.getItem("eita-dados:secao")]) secIni = localStorage.getItem("eita-dados:secao"); } catch (e) { }
+  const st = Object.assign({ sec: secIni, page: "painel", statTab: "descritiva" }, estadoVazio(secIni));
+  const guardado = { interesse: null, pesquisa: null };
+  const saveCfg = () => { try { localStorage.setItem(SECOES[st.sec].ls, JSON.stringify(st.cfg)); } catch (e) { } };
+  const UN = () => (st.model && st.model.tables.part.unidade) || (st.sec === "interesse" ? "solicitações" : "participantes");
+  const ehInteresse = () => !!(st.model && st.model.interesse);
 
   // ---------------- utilidades de interface
   const toast = (msg, ms) => { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, ms || 3200); };
@@ -39,15 +49,38 @@
 
   // ---------------- guardar a base no navegador (IndexedDB)
   const idb = () => new Promise((res, rej) => { const r = indexedDB.open(DB, 1); r.onupgradeneeded = () => r.result.createObjectStore("base"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
-  async function idbPut(v) { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction("base", "readwrite"); tx.objectStore("base").put(v, "atual"); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
-  async function idbGet() { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction("base"); const q = tx.objectStore("base").get("atual"); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
-  async function idbDel() { const db = await idb(); return new Promise(res => { const tx = db.transaction("base", "readwrite"); tx.objectStore("base").delete("atual"); tx.oncomplete = res; tx.onerror = res; }); }
+  async function idbPut(v, sec) { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction("base", "readwrite"); tx.objectStore("base").put(v, SECOES[sec || st.sec].idb); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+  async function idbGet(sec) { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction("base"); const q = tx.objectStore("base").get(SECOES[sec || st.sec].idb); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
+  async function idbDel(sec) { const db = await idb(); return new Promise(res => { const tx = db.transaction("base", "readwrite"); tx.objectStore("base").delete(SECOES[sec || st.sec].idb); tx.oncomplete = res; tx.onerror = res; }); }
+
+  // troca de seção: guarda o estado da atual e remonta a outra (o build é rápido e acerta o estado global do EData)
+  const CAMPOS_SEC = ["raw", "defs", "model", "table", "filters", "explore", "sel", "varCur", "goMode", "cfg"];
+  function trocarSecao(sec, semRender) {
+    if (sec === st.sec || !SECOES[sec]) return;
+    guardado[st.sec] = Object.fromEntries(CAMPOS_SEC.map(k => [k, st[k]]));
+    st.sec = sec; Object.assign(st, guardado[sec] || estadoVazio(sec));
+    try { localStorage.setItem("eita-dados:secao", sec); } catch (e) { }
+    st.model = null; if (st.raw.length) { try { rebuild(); } catch (e) { console.error(e); } }
+    renderNav(); if (!semRender) { if (!st.model && st.page !== "guia" && st.page !== "metodos") location.hash = "dados"; render(); }
+  }
+  // pessoas com ficha de anamnese na base da pesquisa (para marcar quem pediu e já foi atendido)
+  function atendidosDaPesquisa() {
+    const g = st.sec === "pesquisa" ? st : guardado.pesquisa; if (!g || !g.raw || !g.raw.length) return null;
+    try {
+      const { forms } = D.readEpicollect(g.raw); const raiz = forms.find(f => f.records.length && f.records.every(r => !r.ec5_parent_uuid)); if (!raiz) return null;
+      const ks = Object.keys(raiz.records[0] || {}), kn = ks.find(k => /Nome_do_participan/.test(k)), kb = ks.find(k => /^\d+_Data_de_nascimento$/.test(k)), kd = ks.find(k => /^\d+_Data_da_avalia/.test(k));
+      if (!kn) return null;
+      return raiz.records.map(r => ({ nome: r[kn], nasc: kb ? D.parseDate(r[kb]) : null, data: (kd && D.parseDate(r[kd])) || (r.created_at ? String(r.created_at).slice(0, 10) : null) }));
+    } catch (e) { return null; }
+  }
 
   // ---------------- modelo
   function rebuild() {
     const { forms } = D.readEpicollect(st.raw);
     if (!forms.length) { st.model = null; return; }
+    const atend = forms.some(f => f.interesse) ? atendidosDaPesquisa() : null;
     const MP = window.EMapas; const m = D.build(forms, { recodes: JSON.parse(JSON.stringify(st.cfg.recodes)), types: st.cfg.types, defs: st.defs, munNames: MP ? MP.go.shapes.map(s => s.n) : [], ufs: MP ? MP.br.shapes.map(s => ({ c: s.c, n: s.n })) : [], municipios: st.cfg.municipios || {} });
+    if (forms.some(f => f.interesse)) { m.interesse = true; D.ajustarInteresse(m, atend); }
     // rótulos editados
     Object.entries(st.cfg.labels).forEach(([k, l]) => { if (m.vars[k] && l) m.vars[k].label = l; });
     // cada opção de múltipla escolha vira uma variável Sim/Não analisável
@@ -97,7 +130,7 @@
   }
   function renderTopo() {
     const m = st.model; $("#topo").hidden = !m || ["dados", "metodos", "guia"].includes(st.page); if (!m) return;
-    const sel = $("#selTab"); sel.innerHTML = Object.values(m.tables).map(t => `<option value="${t.id}"${t.id === st.table ? " selected" : ""}>${esc(t.unidade === "participantes" ? "Participantes" : t.label.replace(/\s*\(.*\)/, "") + " — " + t.unidade)}</option>`).join("");
+    const sel = $("#selTab"); sel.innerHTML = Object.values(m.tables).map(t => `<option value="${t.id}"${t.id === st.table ? " selected" : ""}>${esc(t.id === "part" ? t.label : t.label.replace(/\s*\(.*\)/, "") + " — " + t.unidade)}</option>`).join("");
     $("#chips").innerHTML = Object.entries(st.filters).map(([k, f]) => `<span class="chip" title="${esc(lbl(k))}"><span>${esc(lbl(k))}: ${esc(f.kind === "in" ? f.values.join(", ") : `${f.min ?? "…"} a ${f.max ?? "…"}`)}</span><button type="button" data-rm="${esc(k)}" aria-label="Remover filtro">×</button></span>`).join("") +
       (Object.keys(st.filters).length > 1 ? `<button class="ghost small" type="button" id="limpaF">Limpar filtros</button>` : "");
     const all = baseRows(st.table).length, n = rowsOf(st.table).length;
@@ -223,6 +256,7 @@
 
   // ---------------- PAINEL
   function pagePainel(pg) {
+    if (ehInteresse()) return pageInteresse(pg);
     const m = st.model, rows = rowsOf("part"), all = baseRows("part");
     pg.innerHTML = `<div class="cab"><div><h2>Painel</h2><p>Visão geral das fichas coletadas. Clique numa barra para filtrar todas as telas por aquele grupo; clique de novo para tirar.</p></div><div class="acoes row"><button type="button" id="pPrint">Imprimir / PDF</button></div></div><div class="kpis" id="kpis"></div><div class="grade" id="grid"></div>`;
     pg.querySelector("#pPrint").onclick = () => { try { window.print(); } catch (e) { toast("Impressão indisponível nesta janela; abra a página no navegador."); } };
@@ -233,7 +267,7 @@
       V("d_idade") && ["Idade", idades.length ? fmt(S.median(idades), 1) + " anos" : "—", idades.length ? `mediana · IIQ ${fmt(S.quantile(idades, .25), 1)}–${fmt(S.quantile(idades, .75), 1)}` : ""],
       V("7_Sexo") && ["Sexo feminino", rows.length ? fmt(100 * rows.filter(r => r["7_Sexo"] === "Feminino").length / rows.filter(r => r["7_Sexo"]).length, 0) + "%" : "—", `${rows.filter(r => r["7_Sexo"] === "Feminino").length} participantes`],
       ...m.forms.filter(f => f.rel === "1:1").map(f => [f.nome.replace(/\s*\(.*\)/, ""), rows.filter(r => r["_has_" + f.slug]).length, `responderam (${fmt(100 * rows.filter(r => r["_has_" + f.slug]).length / Math.max(1, rows.length), 0)}%)`]),
-      q && [q.label.replace(/\s*\(.*\)/, ""), rowsOf(q.id).length, `${q.unidade} · ${new Set(rowsOf(q.id).map(r => r._pid)).size} participantes`],
+      q && [q.label.replace(/\s*\(.*\)/, ""), rowsOf(q.id).length, `${q.unidade} · ${new Set(rowsOf(q.id).map(r => r._pid)).size} ${UN()}`],
     ].filter(Boolean);
     pg.querySelector("#kpis").innerHTML = k.map(([a, b, c]) => `<div class="kpi"><div class="k">${esc(a)}</div><div class="v">${esc(String(b))}</div><div class="d">${esc(c)}</div></div>`).join("");
     const g = pg.querySelector("#grid");
@@ -271,6 +305,72 @@
     st.cfg.pins.forEach((p, i) => { try { exploreCard(g, Object.assign({}, p, { pin: i })); } catch (e) { } });
   }
 
+  // ---------------- PAINEL DA MANIFESTAÇÃO DE INTERESSE
+  function pageInteresse(pg) {
+    const m = st.model, rows = rowsOf("part"), all = baseRows("part");
+    pg.innerHTML = `<div class="cab"><div><h2>Manifestação de interesse</h2><p>Quem pede os produtos do laboratório, o quê, de onde e com qual quadro. Uma linha por solicitação; a mesma pessoa (nome e nascimento) reenviando o formulário em menos de 30 dias conta uma vez só. Clique numa barra para filtrar todas as telas.</p></div><div class="acoes row"><button type="button" id="pPrint">Imprimir / PDF</button></div></div><div class="kpis" id="kpis"></div><div class="grade" id="grid"></div>`;
+    pg.querySelector("#pPrint").onclick = () => { try { window.print(); } catch (e) { toast("Impressão indisponível nesta janela; abra a página no navegador."); } };
+    const pessoas = new Set(rows.map(r => r.d_pessoa)).size, datas = rows.map(r => r.d_data).filter(Boolean).sort();
+    const meses = datas.length ? (+datas[datas.length - 1].slice(0, 4) - +datas[0].slice(0, 4)) * 12 + (+datas[datas.length - 1].slice(5, 7) - +datas[0].slice(5, 7)) + 1 : 0;
+    const idades = rows.map(r => r.d_idade).filter(x => x != null), comUF = rows.filter(r => r.d_uf), foraGO = comUF.filter(r => r.d_uf !== "Goiás").length;
+    const pct = (a, b) => b ? fmt(100 * a / b, 0) + "%" : "—";
+    const at = V("i_atendido") ? new Set(rows.filter(r => r.i_atendido === "Sim").map(r => r.d_pessoa)).size : null;
+    const k = [
+      ["Solicitações", rows.length, rows.length !== all.length ? `de ${all.length} no total` : `${m.tables.part.rows.filter(r => r._dup).length} reenvios contados uma vez`],
+      ["Pessoas", pessoas, `${fmt(rows.length / Math.max(1, pessoas), 2)} solicitação por pessoa`],
+      ["Período", datas.length ? `${mesLbl(datas[0].slice(0, 7))} a ${mesLbl(datas[datas.length - 1].slice(0, 7))}` : "—", meses ? `${meses} meses · ${fmt(rows.length / meses, 1)} por mês` : ""],
+      ["Idade", idades.length ? fmt(S.median(idades), 1) + " anos" : "—", idades.length ? `mediana na solicitação · ${pct(idades.filter(a => a < 18).length, idades.length)} menores de 18` : ""],
+      ["Fora de Goiás", pct(foraGO, comUF.length), `${foraGO} solicitações · ${new Set(comUF.map(r => r.d_uf)).size} estados`],
+      at != null ? ["Atendidas no laboratório", at, `${pct(at, pessoas)} das pessoas têm ficha de anamnese`] : ["Usam órtese", pct(rows.filter(r => r.mi_ortese === "Sim").length, rows.filter(r => r.mi_ortese).length), "das que responderam"],
+    ];
+    pg.querySelector("#kpis").innerHTML = k.map(([a, b, c]) => `<div class="kpi"><div class="k">${esc(a)}</div><div class="v">${esc(String(b))}</div><div class="d">${esc(c)}</div></div>`).join("");
+    const g = pg.querySelector("#grid");
+    if (!rows.length) { g.innerHTML = `<div class="card w12"><p class="vazio">Nenhuma solicitação com os filtros atuais.</p></div>`; return; }
+    catCard(g, "d_mes", { w: 12, vertical: true, title: "Solicitações por mês" });
+    catCard(g, "mi_produto", { title: "Produto solicitado", top: 12 });
+    catCard(g, "mi_item", { title: "Itens do catálogo citados", top: 12 });
+    demandaCard(g);
+    catCard(g, "mi_diag_principal", { title: "Diagnóstico principal", top: 12 });
+    catCard(g, "mi_diag", { title: "Condições citadas no diagnóstico", top: 12 });
+    heatProdDiag(g);
+    catCard(g, "d_faixa", { w: 4, vertical: true, title: "Faixa etária" });
+    catCard(g, "mi_ortese", { w: 4, title: "Faz uso de órtese" });
+    catCard(g, "mi_terapia", { w: 4, title: "Faz terapias atualmente" });
+    catCard(g, "mi_avd_nivel", { title: "Dependência nas atividades da vida diária" });
+    catCard(g, "mi_avd", { title: "Atividades com dependência citadas" });
+    mapCards(g, { compact: true });
+    catCard(g, "d_regiao", { title: "Região de moradia" });
+    if (V("i_atendido")) { catCard(g, "i_atendido", { w: 3, title: "Atendida no lab" }); numCard(g, "i_espera", { w: 3, title: "Dias até a avaliação" }); }
+    else catCard(g, "mi_solicitante", { title: "Tipo de solicitante (estimado)" });
+    st.cfg.pins.forEach((p, i) => { try { exploreCard(g, Object.assign({}, p, { pin: i })); } catch (e) { } });
+  }
+  // demanda por produto: uma linha por produto, para planejar a produção
+  function demandaCard(grid) {
+    if (!V("mi_produto")) return; const rows = rowsOf("part");
+    const lin = (V("mi_produto").levels || []).map(p => { const rs = rows.filter(r => (r.mi_produto || []).includes(p)); if (!rs.length) return null;
+      const id = rs.map(r => r.d_idade).filter(x => x != null), uf = rs.filter(r => r.d_uf), dg = counts(rs, "mi_diag_principal").cats.sort((a, b) => b.value - a.value)[0];
+      const mesesU = new Set(rs.map(r => r.d_mes).filter(Boolean)), ult3 = (() => { const ds = rows.map(r => r.d_mes).filter(Boolean).sort(); const lim = ds.length ? ds[ds.length - 1] : ""; const y = +lim.slice(0, 4), mo = +lim.slice(5, 7) - 2; const ini = mo > 0 ? `${y}-${String(mo).padStart(2, "0")}` : `${y - 1}-${String(mo + 12).padStart(2, "0")}`; return rs.filter(r => r.d_mes && r.d_mes >= ini).length; })();
+      return { p, n: rs.length, pes: new Set(rs.map(r => r.d_pessoa)).size, idade: id.length ? S.median(id) : NaN, menor: id.length ? id.filter(a => a < 18).length / id.length : NaN, go: uf.length ? uf.filter(r => r.d_uf === "Goiás").length / uf.length : NaN, dg: dg ? dg.label : "—", ult3, at: V("i_atendido") ? rs.filter(r => r.i_atendido === "Sim").length : null, meses: mesesU.size };
+    }).filter(Boolean).sort((a, b) => b.n - a.n);
+    const c = document.createElement("div"); c.className = "card w12";
+    const tab = () => `<table class="t" id="tDem"><thead><tr><th>Produto</th><th class="n">Solicitações</th><th class="n">Pessoas</th><th class="n">Últimos 3 meses</th><th class="n">Idade (mediana)</th><th class="n">Menores de 18</th><th class="n">De Goiás</th>${V("i_atendido") ? '<th class="n">Atendidas</th>' : ""}<th>Diagnóstico mais comum</th></tr></thead><tbody>${lin.map(l => `<tr data-p="${esc(l.p)}" style="cursor:pointer"><td><b>${esc(l.p)}</b></td><td class="n">${l.n}</td><td class="n">${l.pes}</td><td class="n">${l.ult3}</td><td class="n">${isFinite(l.idade) ? fmt(l.idade, 1) : "—"}</td><td class="n">${isFinite(l.menor) ? fmt(100 * l.menor, 0) + "%" : "—"}</td><td class="n">${isFinite(l.go) ? fmt(100 * l.go, 0) + "%" : "—"}</td>${l.at != null ? `<td class="n">${l.at}</td>` : ""}<td>${esc(l.dg)}</td></tr>`).join("")}</tbody></table>`;
+    c.innerHTML = `<h4>Demanda por produto</h4><div class="sub">Para planejar a produção · uma solicitação pode pedir mais de um produto · “últimos 3 meses” conta os 3 meses mais recentes da base · clique numa linha para filtrar</div><div class="menu"><button type="button" data-a="copy">Copiar tabela</button><button type="button" data-a="rep">+ Relatório</button></div><div class="tw">${tab()}</div>`;
+    c.querySelector(".menu").onclick = e => { const a = e.target.dataset.a; if (a === "copy") copyTable(c.querySelector("table")); if (a === "rep") addToReport("Demanda por produto", c); };
+    c.querySelector("tbody").onclick = e => { const tr = e.target.closest("tr[data-p]"); if (tr) toggleFilter("mi_produto", tr.dataset.p); };
+    grid.appendChild(c);
+  }
+  // produto × diagnóstico principal (contagens)
+  function heatProdDiag(grid) {
+    if (!V("mi_produto") || !V("mi_diag_principal")) return; const rows = rowsOf("part");
+    const prods = counts(rows, "mi_produto").cats.sort((a, b) => b.value - a.value).slice(0, 8).map(c => c.label);
+    const diags = counts(rows, "mi_diag_principal").cats.sort((a, b) => b.value - a.value).slice(0, 8).map(c => c.label);
+    if (prods.length < 2 || diags.length < 2) return;
+    const mtx = prods.map(p => diags.map(d => rows.filter(r => (r.mi_produto || []).includes(p) && r.mi_diag_principal === d).length));
+    const c = card({ title: "Produto × diagnóstico principal", sub: "Número de solicitações · os 8 produtos e os 8 diagnósticos mais frequentes", w: 12, table: () => `<table class="t"><thead><tr><th>Produto</th>${diags.map(d => `<th class="n">${esc(d)}</th>`).join("")}</tr></thead><tbody>${prods.map((p, i) => `<tr><td>${esc(p)}</td>${mtx[i].map(v => `<td class="n">${v}</td>`).join("")}</tr>`).join("")}</tbody></table>` });
+    grid.appendChild(c);
+    mount(c.querySelector(".ch"), () => CH.heat(c.querySelector(".ch"), { rows: prods, cols: diags, m: mtx, fmt: v => String(v), title: "Produto × diagnóstico principal", tipRows: (i, j) => [["solicitações", String(mtx[i][j])], ["% do produto", fmt(100 * mtx[i][j] / Math.max(1, rows.filter(r => (r.mi_produto || []).includes(prods[i])).length), 0) + "%"]] }));
+  }
+
   // ---------------- MAPAS
   function mapCards(grid, o) {
     const MP = window.EMapas; if (!MP || !V("d_uf")) return;
@@ -280,10 +380,10 @@
     rows.forEach(r => { const u = ufCode[r.d_uf]; if (u) byUF[u] = (byUF[u] || 0) + 1; else semUF++; const m = munCode[r.d_municipio]; if (m) byMun[m] = (byMun[m] || 0) + 1; else if (r.d_municipio) foraGO++; else semMun++; });
     const nUF = Object.keys(byUF).length, nMun = Object.keys(byMun).length, comMun = total - semMun;
     const selUF = st.filters.d_uf && st.filters.d_uf.kind === "in" ? new Set(st.filters.d_uf.values) : null, selMun = st.filters.d_municipio && st.filters.d_municipio.kind === "in" ? new Set(st.filters.d_municipio.values) : null;
-    const tUF = () => `<table class="t"><thead><tr><th>Estado</th><th class="n">Participantes</th><th class="n">%</th></tr></thead><tbody>${MP.br.shapes.filter(s => byUF[s.c]).sort((a, b) => byUF[b.c] - byUF[a.c]).map(s => `<tr><td>${esc(s.n)}</td><td class="n">${byUF[s.c]}</td><td class="n">${fmt(100 * byUF[s.c] / Math.max(1, total - semUF), 1)}</td></tr>`).join("")}${semUF ? `<tr><td class="note">Sem estado informado</td><td class="n">${semUF}</td><td></td></tr>` : ""}</tbody></table>`;
-    const tMun = () => `<table class="t"><thead><tr><th>Município</th><th class="n">Participantes</th><th class="n">%</th></tr></thead><tbody>${MP.go.shapes.filter(s => byMun[s.c]).sort((a, b) => byMun[b.c] - byMun[a.c]).map(s => `<tr><td>${esc(s.n)}</td><td class="n">${byMun[s.c]}</td><td class="n">${fmt(100 * byMun[s.c] / Math.max(1, comMun - foraGO), 1)}</td></tr>`).join("")}${foraGO ? `<tr><td class="note">Fora de Goiás</td><td class="n">${foraGO}</td><td></td></tr>` : ""}${semMun ? `<tr><td class="note">Sem município informado</td><td class="n">${semMun}</td><td></td></tr>` : ""}</tbody></table>`;
-    const c1 = card({ title: "Estados atendidos", sub: `${nUF} ${nUF === 1 ? "estado" : "estados"} · ${total - semUF} participantes com estado informado`, w: 6, table: tUF });
-    const c2 = card({ title: "Municípios de Goiás atendidos", sub: comMun ? `${nMun} ${nMun === 1 ? "município" : "municípios"} · ${comMun} de ${total} participantes com município informado` : `A ficha atual não pergunta o município. Complete na tela Mapa.`, w: 6, table: tMun });
+    const tUF = () => `<table class="t"><thead><tr><th>Estado</th><th class="n">${esc(UN()[0].toUpperCase() + UN().slice(1))}</th><th class="n">%</th></tr></thead><tbody>${MP.br.shapes.filter(s => byUF[s.c]).sort((a, b) => byUF[b.c] - byUF[a.c]).map(s => `<tr><td>${esc(s.n)}</td><td class="n">${byUF[s.c]}</td><td class="n">${fmt(100 * byUF[s.c] / Math.max(1, total - semUF), 1)}</td></tr>`).join("")}${semUF ? `<tr><td class="note">Sem estado informado</td><td class="n">${semUF}</td><td></td></tr>` : ""}</tbody></table>`;
+    const tMun = () => `<table class="t"><thead><tr><th>Município</th><th class="n">${esc(UN()[0].toUpperCase() + UN().slice(1))}</th><th class="n">%</th></tr></thead><tbody>${MP.go.shapes.filter(s => byMun[s.c]).sort((a, b) => byMun[b.c] - byMun[a.c]).map(s => `<tr><td>${esc(s.n)}</td><td class="n">${byMun[s.c]}</td><td class="n">${fmt(100 * byMun[s.c] / Math.max(1, comMun - foraGO), 1)}</td></tr>`).join("")}${foraGO ? `<tr><td class="note">Fora de Goiás</td><td class="n">${foraGO}</td><td></td></tr>` : ""}${semMun ? `<tr><td class="note">Sem município informado</td><td class="n">${semMun}</td><td></td></tr>` : ""}</tbody></table>`;
+    const c1 = card({ title: ehInteresse() ? "Estados de origem" : "Estados atendidos", sub: `${nUF} ${nUF === 1 ? "estado" : "estados"} · ${total - semUF} ${UN()} com estado informado`, w: 6, table: tUF });
+    const c2 = card({ title: ehInteresse() ? "Municípios de Goiás de origem" : "Municípios de Goiás atendidos", sub: comMun ? `${nMun} ${nMun === 1 ? "município" : "municípios"} · ${comMun} de ${total} ${UN()} com município informado` : `A ficha atual não pergunta o município. Complete na tela Mapa.`, w: 6, table: tMun });
     grid.appendChild(c1); grid.appendChild(c2);
     mount(c1.querySelector(".ch"), () => CH.map(c1.querySelector(".ch"), { map: MP.br, values: byUF, selected: selUF, title: "Estados atendidos", labels: 27, labelText: s => s.c, labelSize: 10, maxH: o.compact ? 380 : 560, onClick: k => toggleFilter("d_uf", k) }));
     const dfPts = [...MP.go.df.matchAll(/([\d.]+),([\d.]+)/g)].map(q => [+q[1], +q[2]]);
@@ -296,8 +396,8 @@
     const regOf = sh => { const k = D.key(sh.n); return k === D.RMG[0] ? REG[0] : D.RMG.includes(k) ? REG[1] : REG[2]; };
     if (mode === "reg") {
       c2.querySelector("h4").textContent = "Goiás por região de moradia";
-      c2.querySelector(".sub").textContent = `${nReg} de ${total} participantes responderam “Cidade que mora” (capital, Região Metropolitana ou demais municípios)`;
-      c2._tab = () => `<table class="t"><thead><tr><th>Região</th><th class="n">Participantes</th></tr></thead><tbody>${REG.map(g => `<tr><td>${esc(g)}</td><td class="n">${byReg[g] || 0}</td></tr>`).join("")}<tr><td class="note">Sem resposta</td><td class="n">${total - nReg}</td></tr></tbody></table>`;
+      c2.querySelector(".sub").textContent = `${nReg} de ${total} ${UN()} responderam “Cidade que mora” (capital, Região Metropolitana ou demais municípios)`;
+      c2._tab = () => `<table class="t"><thead><tr><th>Região</th><th class="n">${esc(UN()[0].toUpperCase() + UN().slice(1))}</th></tr></thead><tbody>${REG.map(g => `<tr><td>${esc(g)}</td><td class="n">${byReg[g] || 0}</td></tr>`).join("")}<tr><td class="note">Sem resposta</td><td class="n">${total - nReg}</td></tr></tbody></table>`;
       const gs = MP.go.shapes.find(s => D.key(s.n) === D.RMG[0]) || { cx: 0, cy: 0 };
       const selReg = st.filters.d_regiao && st.filters.d_regiao.kind === "in" ? new Set(st.filters.d_regiao.values) : null;
       mount(c2.querySelector(".ch"), () => CH.map(c2.querySelector(".ch"), { map: MP.go, values: byReg, shapeVal: sh => byReg[regOf(sh)] || 0, keyOf: regOf, selected: selReg, under: dfShape, maxH: o.compact ? 380 : 620, title: "Goiás por região de moradia",
@@ -312,7 +412,7 @@
   }
   function pageMapa(pg) {
     const MP = window.EMapas, m = st.model;
-    pg.innerHTML = `<div class="cab"><div><h2>Mapa de atendimento</h2><p>De onde vêm os participantes: estados do Brasil e municípios de Goiás. Clique num estado ou município colorido para filtrar todas as telas.</p></div></div><div class="row" style="margin-bottom:12px"><span class="note" style="font-weight:600">Goiás por</span><select id="mMode"><option value="">automático</option><option value="mun">município</option><option value="reg">região (capital / Região Metropolitana / demais)</option></select></div><div class="grade" id="mGrid"></div><div id="mFill"></div>`;
+    pg.innerHTML = `<div class="cab"><div><h2>${ehInteresse() ? "Mapa das solicitações" : "Mapa de atendimento"}</h2><p>De onde vêm ${ehInteresse() ? "as solicitações" : "os participantes"}: estados do Brasil e municípios de Goiás. Clique num estado ou município colorido para filtrar todas as telas.</p></div></div><div class="row" style="margin-bottom:12px"><span class="note" style="font-weight:600">Goiás por</span><select id="mMode"><option value="">automático</option><option value="mun">município</option><option value="reg">região (capital / Região Metropolitana / demais)</option></select></div><div class="grade" id="mGrid"></div><div id="mFill"></div>`;
     $("#mMode").value = st.goMode || ""; $("#mMode").onchange = e => { st.goMode = e.target.value || null; render(); };
     const res = mapCards($("#mGrid"), { compact: false }) || {};
     // completar municípios
@@ -321,7 +421,7 @@
     const munNames = MP.go.shapes.map(s => s.n).sort((a, b) => a.localeCompare(b, "pt-BR"));
     const textKeys = ["49_Bairro", "20_Local_do_parto", "47_Cidade_que_mora", "88_Observaes", "55_Se_sim_quais_e_qu"].filter(k => V(k));
     const pend = rows.filter(r => !r.d_municipio || man[r._uuid]);
-    const name = r => r["4_Nome_do_participan"] || r._title || "";
+    const name = r => r["4_Nome_do_participan"] || r.mi_nome || r._title || "";
     const sug = r => man[r._uuid] ? null : D.suggestMun(textKeys.map(k => r[k]), munNames);
     const nSug = rows.filter(r => !r.d_municipio && sug(r)).length;
     $("#mFill").innerHTML = `<div class="painelf" style="margin-top:14px"><h3 class="sec" style="margin-top:0">Completar municípios</h3>
@@ -858,7 +958,13 @@
 
   // ---------------- fluxograma de participantes
   function pageFluxo(pg) {
-    const m = st.model, all = m.tables.part.rows, lang = st.cfg.flowLang || "pt", T = (pt, en) => lang === "en" ? en : pt;
+    const m = st.model, all = m.tables.part.rows, lang = st.cfg.flowLang || "pt";
+    // na manifestação de interesse a unidade é a solicitação
+    const TROCA = [["Fichas de anamnese registradas", "Solicitações recebidas"], ["Incluídos na análise", "Incluídas na análise"], ["Fichas duplicadas", "Reenvios do formulário"], ["Reavaliações da mesma pessoa", "Novos pedidos da mesma pessoa"], ["Participantes únicos", st.cfg.firstOnly !== false ? "Pessoas" : "Solicitações distintas"],
+      ["fichas de anamnese", "solicitações"], ["duplicada(s)", "reenvio(s)"], ["reavaliação(ões) da mesma pessoa", "novo(s) pedido(s) da mesma pessoa"], ["Fluxograma de participantes", "Fluxograma das solicitações"], ["participante(s)", "solicitação(ões)"], ["participantes", "solicitações"], ["quantas fichas foram registradas", "quantas solicitações chegaram"], ["quantas pessoas responderam cada instrumento", "quantas pessoas já foram atendidas"],
+      ["Intake forms recorded", "Requests received"], ["Duplicate records", "Resubmitted forms"], ["Repeated assessments", "Repeat requests"], ["Unique participants", "Distinct requests"], ["intake forms", "requests"], ["Participant flow diagram", "Request flow diagram"], ["participants", "requests"]];
+    const vv = x => ehInteresse() ? TROCA.reduce((a, [de, para]) => a.split(de).join(para), x) : x;
+    const T = (pt, en) => vv(lang === "en" ? en : pt);
     const dups = all.filter(r => r._dup).length, reav = all.filter(r => !r._dup && r._mom > 1).length;
     const base = baseRows("part"), incl = rowsOf("part"), filt = base.length - incl.length;
     const main = [{ lines: [T("Fichas de anamnese registradas", "Intake forms recorded"), `(n = ${all.length})`] }];
@@ -871,12 +977,16 @@
     if (V("s_bipq") || m.forms.some(f => /ipq/i.test(f.slug))) { const f = m.forms.find(x => /ipq/i.test(x.slug)); branches.push(["B-IPQ", T(`Responderam: ${cnt(r => r["_has_" + f.slug])}`, `Answered: ${cnt(r => r["_has_" + f.slug])}`), T(`Escore total calculado: ${cnt(r => r.s_bipq != null)}`, `Total score available: ${cnt(r => r.s_bipq != null)}`)]); }
     if (D.sfDomains && V("s_sf_cf")) { const f = m.forms.find(x => /sf/i.test(x.slug)); branches.push(["SF-36", T(`Responderam: ${cnt(r => r["_has_" + f.slug])}`, `Answered: ${cnt(r => r["_has_" + f.slug])}`), T(`8 domínios calculados: ${cnt(r => D.sfDomains.every(k => r[k] != null))}`, `All 8 domains: ${cnt(r => D.sfDomains.every(k => r[k] != null))}`)]); }
     const qt = Object.values(m.tables).find(t => t.id !== "part");
+    if (V("i_atendido")) branches.push([T("Atendimento no laboratório", "Seen at the lab"), T(`Com ficha de anamnese: ${new Set(incl.filter(r => r.i_atendido === "Sim").map(r => r.d_pessoa)).size} pessoas`, `With intake form: ${new Set(incl.filter(r => r.i_atendido === "Sim").map(r => r.d_pessoa)).size} people`)]);
     if (qt) { const ids = new Set(incl.map(r => r._id)), qr = qt.rows.filter(r => ids.has(r._pid)); branches.push(["B-QUEST", T(`Participantes: ${new Set(qr.map(r => r._pid)).size}`, `Participants: ${new Set(qr.map(r => r._pid)).size}`), T(`Dispositivos avaliados: ${qr.length}`, `Devices rated: ${qr.length}`), T(`Escore total calculado: ${qr.filter(r => r.s_quest_total != null).length}`, `Total score available: ${qr.filter(r => r.s_quest_total != null).length}`)]); }
     pg.innerHTML = `<div class="cab"><div><h2>Fluxograma de participantes</h2><p>Diagrama de fluxo no formato pedido pelas revistas (STROBE): quantas fichas foram registradas, quantas saíram e por quê, e quantas pessoas responderam cada instrumento. Ele segue as regras de inclusão (tela Dados) e os filtros do topo, que aparecem como critérios de exclusão.</p></div>
       <div class="acoes row"><label class="chk"><input type="checkbox" id="flEn"${lang === "en" ? " checked" : ""}> Em inglês</label></div></div>
       ${helpBox("fluxo")}<div class="painelf res"><h3 class="sec" style="margin-top:0">${T("Fluxograma de participantes", "Participant flow diagram")}</h3><div class="ch" id="flCh"></div>
       <div class="row noprint" style="margin-top:14px;justify-content:flex-end;border-top:1px solid var(--linha);padding-top:10px"><button class="small" type="button" data-fig>Exportar figura</button><button class="small primary" type="button" data-rep data-title="Fluxograma de participantes">+ Adicionar ao relatório</button></div></div>
       ${frase(T(`Foram registradas ${all.length} fichas de anamnese${side1.length ? `; ${[st.cfg.excludeDup !== false && dups ? `${dups} duplicada(s)` : "", st.cfg.firstOnly !== false && reav ? `${reav} reavaliação(ões) da mesma pessoa` : ""].filter(Boolean).join(" e ")} foram excluídas` : ""}${filt ? `, e ${filt} participante(s) não atenderam aos critérios de inclusão (${esc(filtersText())})` : ""}. Foram incluídos ${incl.length} participantes${branches.map(b => `; ${b[1].replace(/^Responderam: /, "")} responderam ao ${b[0]}`).join("").replace(/Participantes: /, "")}.`, `A total of ${all.length} intake forms were recorded${side1.length ? `; ${dups + (st.cfg.firstOnly !== false ? reav : 0)} were excluded (duplicates or repeated assessments)` : ""}${filt ? `, and ${filt} did not meet the inclusion criteria` : ""}. ${incl.length} participants were included.`), T("Para o texto de métodos/resultados", "For the methods/results section"))}`;
+    if (ehInteresse() && lang !== "en") { const f = pg.querySelector(".frase"); const nAt = V("i_atendido") ? new Set(incl.filter(r => r.i_atendido === "Sim").map(r => r.d_pessoa)).size : null, nP = new Set(incl.map(r => r.d_pessoa)).size;
+      if (f) f.innerHTML = `<span class="lbl">Para o texto de métodos/resultados</span>Foram recebidas ${all.length} solicitações pelo formulário de manifestação de interesse${st.cfg.excludeDup !== false && dups ? `; ${dups} reenvios da mesma pessoa em menos de 30 dias foram contados uma vez` : ""}${st.cfg.firstOnly !== false && reav ? `; ${reav} pedidos posteriores da mesma pessoa foram desconsiderados` : ""}${filt ? `; ${filt} não atenderam aos critérios de inclusão (${esc(filtersText())})` : ""}. Foram analisadas ${incl.length} solicitações de ${nP} pessoas${nAt != null ? `, das quais ${nAt} (${fmt(100 * nAt / Math.max(1, nP), 1)}%) tinham ficha de anamnese no laboratório` : ""}.`; }
+    if (ehInteresse()) { const c = pg.querySelector(".cab"); c.innerHTML = vv(c.innerHTML); pg.querySelectorAll("[data-title]").forEach(b => b.dataset.title = vv(b.dataset.title)); }
     $("#flEn").onchange = e => { st.cfg.flowLang = e.target.checked ? "en" : "pt"; saveCfg(); render(); };
     mount($("#flCh"), () => CH.flow($("#flCh"), { steps: { main, branches } }));
     wireActions(pg);
@@ -941,7 +1051,7 @@
   // ---------------- TABELA 1
   function pageTabela1(pg) {
     const t = st.model.tables[st.table];
-    const def = ["7_Sexo", "d_idade", "d_faixa", "d_diag", "d_prematuro", "43_Escolaridade", "42_Situao_Profission", "76_Comunicao_e_cogni", "d_motor", "s_bipq", ...(D.sfDomains || [])].filter(k => V(k) && t.vars.includes(k));
+    const def = ehInteresse() ? ["d_idade", "d_faixa", "mi_diag_principal", "mi_avd_nivel", "mi_ortese", "mi_terapia", "d_regiao", "mi_n_produtos"].filter(k => V(k)) : ["7_Sexo", "d_idade", "d_faixa", "d_diag", "d_prematuro", "43_Escolaridade", "42_Situao_Profission", "76_Comunicao_e_cogni", "d_motor", "s_bipq", ...(D.sfDomains || [])].filter(k => V(k) && t.vars.includes(k));
     if (def.length < 3) varList({ types: ["num", "cat"], noVirtual: true }).filter(v => v.raw && !def.includes(v.id)).slice(0, 8).forEach(v => def.push(v.id));
     pg.innerHTML = `<div class="cab"><div><h2>Tabela para artigo</h2><p>A “Tabela 1” de caracterização da amostra, no formato das revistas: números como média ± DP ou mediana [IIQ] conforme a normalidade, categorias como n (%), e o valor de p da comparação entre grupos, com o teste indicado em nota.</p></div></div>
       ${helpBox("tabela1")}<div class="painelf"><div class="campos" style="grid-template-columns:2fr 1fr"><div><div class="note" style="font-weight:600;margin-bottom:5px">Linhas da tabela</div>${varChecks("t1", { types: ["num", "cat"], noVirtual: false }, def)}</div>
@@ -1022,7 +1132,7 @@
   // ---------------- VARIÁVEIS (rótulos, tipos e recodificação)
   function pageVariaveis(pg) {
     const m = st.model; const all = Object.values(m.vars).filter(v => !v.virtual && (st.cfg.showPII || !v.pii));
-    if (!st.varCur || !V(st.varCur)) st.varCur = "d_diag";
+    if (!st.varCur || !V(st.varCur)) st.varCur = V("d_diag") ? "d_diag" : V("mi_produto") ? "mi_produto" : (all.find(v => !v.pii && !v.hide && (v.type === "cat" || v.type === "multi")) || all[0]).id;
     pg.innerHTML = `<div class="cab"><div><h2>Variáveis</h2><p>Todas as perguntas e as variáveis calculadas. Aqui você corrige rótulos, junta categorias escritas de jeitos diferentes, transforma texto livre em categorias e esconde o que não interessa. As regras ficam salvas neste navegador e podem ser exportadas para a equipe usar as mesmas.</p></div></div>
       <div class="vars"><div><input type="search" id="vBusca" placeholder="Buscar variável" style="width:100%;margin-bottom:8px"><div class="vlist" id="vList"></div></div><div id="vDet"></div></div>`;
     const list = () => {
@@ -1036,7 +1146,7 @@
     const det = () => {
       const v = V(st.varCur), t = m.tables[tableOf(v.id)], rows = t.rows; const el = $("#vDet");
       const rec = st.cfg.recodes[v.id] || {};
-      let h = `<div class="painelf"><div class="row" style="justify-content:space-between;align-items:flex-start"><div><div class="note">${esc(v.section)} · ${v.derived ? "calculada pela ferramenta" : "pergunta do Epicollect (" + esc(v.form || "") + ")"} · código <code>${esc(v.id)}</code></div><h3 style="margin:4px 0 0;font:700 20px var(--f-display)">${esc(v.label)}</h3>${v.fullQuestion ? `<p class="note">Enunciado: ${esc(v.fullQuestion)}</p>` : ""}${v.desc ? `<p class="note" style="max-width:80ch">${esc(v.desc)}</p>` : ""}</div>
+      let h = `<div class="painelf"><div class="row" style="justify-content:space-between;align-items:flex-start"><div><div class="note">${esc(v.section)} · ${v.derived ? "calculada pela ferramenta" : (v.source === "Epicollect" ? "pergunta do Epicollect (" : "coluna da planilha (") + esc(v.form || "") + ")"} · código <code>${esc(v.id)}</code></div><h3 style="margin:4px 0 0;font:700 20px var(--f-display)">${esc(v.label)}</h3>${v.fullQuestion ? `<p class="note">Enunciado: ${esc(v.fullQuestion)}</p>` : ""}${v.desc ? `<p class="note" style="max-width:80ch">${esc(v.desc)}</p>` : ""}</div>
         <label class="chk"><input type="checkbox" id="vHide"${(st.cfg.hidden || []).includes(v.id) ? " checked" : ""}> Ocultar nas análises</label></div>
         <div class="campos" style="margin-top:12px"><label>Rótulo<input type="text" id="vLbl" value="${esc(st.cfg.labels[v.id] || v.label)}"></label>
         ${v.raw ? `<label>Tipo<select id="vType">${[["cat", "Categoria"], ["num", "Número"], ["text", "Texto livre"], ["multi", "Múltipla escolha"], ["date", "Data"]].map(([k, l]) => `<option value="${k}"${v.type === k ? " selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}
@@ -1099,8 +1209,10 @@
   // ---------------- DADOS (carregar)
   function pageDados(pg) {
     const m = st.model;
-    pg.innerHTML = `<div class="cab"><div><h2>Dados</h2><p>Carregue a exportação do Epicollect5. Os arquivos são lidos <b>só neste navegador</b>: nada é enviado para servidores, nem para o Claude.</p></div></div>
-      <div class="drop" id="drop" tabindex="0" role="button"><b>Solte aqui o .zip exportado do Epicollect</b>ou arquivos .json, .csv e planilhas do Excel (.xlsx) · clique para escolher<br><span class="note">No Epicollect: projeto → Download → JSON ou CSV → todas as fichas. Pode incluir a “definição do projeto” para trazer os enunciados completos. Planilhas de outras coletas também entram: uma linha por participante, nomes das perguntas na primeira linha.</span></div>
+    const INT = st.sec === "interesse";
+    pg.innerHTML = `<div class="cab"><div><h2>Dados · ${esc(SECOES[st.sec].nome)}</h2><p>${INT ? "Carregue as respostas do formulário de manifestação de interesse nos produtos." : "Carregue a exportação do Epicollect5."} Os arquivos são lidos <b>só neste navegador</b>: nada é enviado para servidores, nem para o Claude.</p></div></div>
+      ${INT ? `<div class="drop" id="drop" tabindex="0" role="button"><b>Solte aqui a planilha de respostas do formulário</b>.csv, .xlsx ou o .zip baixado · clique para escolher<br><span class="note">No Google Forms: Respostas → ⋮ → Baixar respostas (.csv). Na planilha do Google: Arquivo → Fazer download → .xlsx ou .csv. A ferramenta reconhece as colunas pelo enunciado (nome do interessado, produto, diagnóstico…); colunas novas no formulário também entram.</span></div>`
+      : `<div class="drop" id="drop" tabindex="0" role="button"><b>Solte aqui o .zip exportado do Epicollect</b>ou arquivos .json, .csv e planilhas do Excel (.xlsx) · clique para escolher<br><span class="note">No Epicollect: projeto → Download → JSON ou CSV → todas as fichas. Pode incluir a “definição do projeto” para trazer os enunciados completos. Planilhas de outras coletas também entram: uma linha por participante, nomes das perguntas na primeira linha. A planilha do formulário de manifestação de interesse vai sozinha para a seção dela.</span></div>`}
       <input type="file" id="fi" accept=".zip,.json,.csv,.tsv,.txt,.xlsx,.xlsm,.xls,.ods,application/json,application/zip,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple hidden>
       <div id="dInfo" style="margin-top:16px"></div>`;
     const drop = $("#drop"), fi = $("#fi");
@@ -1110,17 +1222,19 @@
     fi.onchange = () => loadFiles([...fi.files]);
     if (m) {
       $("#dInfo").innerHTML = `<div class="painelf"><h4 style="margin:0 0 8px;font:700 16px var(--f-display)">Base carregada</h4><table class="t" style="max-width:820px"><thead><tr><th>Formulário</th><th class="n">Registros</th><th>Ligação</th><th>Vira</th></tr></thead><tbody>${m.forms.map(f => `<tr><td>${esc(f.nome)}<div class="note">${esc(f.slug)}</div></td><td class="n">${f.n}</td><td>${f.rel === "raiz" ? "ficha principal" : f.rel === "1:1" ? "uma por participante" : "várias por participante"}${f.orphans ? ` · <span class="badge aviso">${f.orphans} sem vínculo</span>` : ""}</td><td>${f.rel === "1:n" ? "tabela própria (" + esc(m.tables[f.slug].unidade) + ")" : "colunas da tabela de participantes"}</td></tr>`).join("")}</tbody></table>
-        <p class="note">Os formulários são ligados pela cadeia de identificadores do Epicollect (cada ficha filha aponta para a mãe). Arquivos lidos: ${st.raw.map(r => esc(r.name)).join(", ")}${st.defs.length ? " + definição do projeto" : ""}.</p>
+        <p class="note">${INT ? "Cada linha da planilha é uma solicitação. Produto, diagnóstico, atividades da vida diária, altura, peso e cidade são lidos do texto livre e agrupados (regras em Como calculamos). Arquivos lidos:" : "Os formulários são ligados pela cadeia de identificadores do Epicollect (cada ficha filha aponta para a mãe). Arquivos lidos:"} ${st.raw.map(r => esc(r.name)).join(", ")}${st.defs.length ? " + definição do projeto" : ""}.</p>
         <div class="row" style="margin-top:12px"><label class="chk"><input type="checkbox" id="dPer"${st.cfg.persist ? " checked" : ""}> Guardar a base neste navegador para a próxima visita</label><button type="button" class="ghost" id="dDel">Apagar a base deste navegador</button></div>
         <p class="note">A base guardada contém dados identificáveis. Desmarque em computadores compartilhados.</p></div>
         <div class="painelf"><h4 style="margin:0 0 8px;font:700 16px var(--f-display)">Regras de inclusão</h4>
-        <label class="chk"><input type="checkbox" id="dDup"${st.cfg.excludeDup !== false ? " checked" : ""}> Excluir fichas duplicadas (mesmo nome e nascimento, menos de 30 dias entre as avaliações) · ${m.tables.part.rows.filter(r => r._dup).length} na base</label><br>
-        <label class="chk" style="margin-top:6px"><input type="checkbox" id="dFirst"${st.cfg.firstOnly !== false ? " checked" : ""}> Usar só a 1ª avaliação de cada pessoa nas análises (as reavaliações entram em “Antes e depois”) · ${m.tables.part.rows.filter(r => !r._dup && r._mom > 1).length} reavaliação(ões) na base</label>
+        ${INT ? `<label class="chk"><input type="checkbox" id="dDup"${st.cfg.excludeDup !== false ? " checked" : ""}> Contar uma vez os reenvios do formulário (mesmo nome e nascimento, menos de 30 dias entre os envios; os produtos do reenvio passam para o pedido mantido) · ${m.tables.part.rows.filter(r => r._dup).length} na base</label><br>
+        <label class="chk" style="margin-top:6px"><input type="checkbox" id="dFirst"${st.cfg.firstOnly !== false ? " checked" : ""}> Usar só o 1º pedido de cada pessoa (uma linha por pessoa) · ${m.tables.part.rows.filter(r => !r._dup && r._mom > 1).length} novo(s) pedido(s) da mesma pessoa, 30 dias ou mais depois</label>`
+        : `<label class="chk"><input type="checkbox" id="dDup"${st.cfg.excludeDup !== false ? " checked" : ""}> Excluir fichas duplicadas (mesmo nome e nascimento, menos de 30 dias entre as avaliações) · ${m.tables.part.rows.filter(r => r._dup).length} na base</label><br>
+        <label class="chk" style="margin-top:6px"><input type="checkbox" id="dFirst"${st.cfg.firstOnly !== false ? " checked" : ""}> Usar só a 1ª avaliação de cada pessoa nas análises (as reavaliações entram em “Antes e depois”) · ${m.tables.part.rows.filter(r => !r._dup && r._mom > 1).length} reavaliação(ões) na base</label>`}
         <p class="note">Essas regras valem para todas as telas e aparecem no fluxograma e no relatório.</p></div>`;
       $("#dPer").onchange = async e => { st.cfg.persist = e.target.checked; saveCfg(); try { if (st.cfg.persist) await idbPut({ raw: st.raw, defs: st.defs }); else await idbDel(); } catch (er) { } toast(st.cfg.persist ? "A base fica guardada neste navegador." : "A base não será guardada."); };
       $("#dDup").onchange = e => { st.cfg.excludeDup = e.target.checked; saveCfg(); toast("Regra aplicada em todas as telas."); };
       $("#dFirst").onchange = e => { st.cfg.firstOnly = e.target.checked; saveCfg(); toast("Regra aplicada em todas as telas."); };
-      $("#dDel").onclick = async () => { await idbDel().catch(() => { }); st.raw = []; st.defs = []; st.model = null; st.filters = {}; renderNav(); render(); toast("Base apagada deste navegador."); };
+      $("#dDel").onclick = async () => { await idbDel().catch(() => { }); st.raw = []; st.defs = []; st.model = null; st.filters = {}; renderNav(); render(); toast(`Base de ${SECOES[st.sec].nome.toLowerCase()} apagada deste navegador.`); };
     }
   }
   async function loadFiles(files) {
@@ -1148,20 +1262,28 @@
     } catch (e) { toast("Não consegui ler: " + e.message + (/xls|ods/i.test(e.message + files.map(f => f.name).join()) ? " — salve a planilha como .xlsx ou .csv e tente de novo." : ""), 7000); return; }
     // tabelas exportadas pelo Epicollect (CSV, ou CSV aberto e salvo no Excel) entram como os JSON
     tabelas.filter(t => D.ehEpicollect(t.head)).forEach(t => out.push(D.deEpicollectCSV(/form-\d+__/.test(t.arquivo) ? t.arquivo : t.nome + ".csv", t.head, t.rows)));
-    const outras = tabelas.filter(t => !D.ehEpicollect(t.head));
-    const concluir = (forms, novasDefs) => {
+    // planilha do formulário de manifestação de interesse: vai para a seção dela
+    const tInt = tabelas.filter(t => D.ehInteresse(t.head)).sort((a, b) => b.rows.length - a.rows.length)[0];
+    const outras = tabelas.filter(t => !D.ehEpicollect(t.head) && !D.ehInteresse(t.head));
+    const concluir = (forms, novasDefs, sec) => {
+      if (sec && sec !== st.sec) trocarSecao(sec, true);
       if (!forms.length && novasDefs.length && st.raw.length) { st.defs = novasDefs; }
       else if (!forms.length) { toast("Nenhum dado encontrado nesses arquivos (use a exportação do Epicollect, um .csv ou uma planilha do Excel).", 6000); return; }
       else { st.raw = forms; if (novasDefs.length) st.defs = novasDefs; else if (forms.some(f => f.planilha)) st.defs = []; }
       try { rebuild(); } catch (e) { toast("Erro ao montar a base: " + e.message, 7000); console.error(e); return; }
       if (st.cfg.persist) idbPut({ raw: st.raw, defs: st.defs }).catch(() => { });
-      toast(`Base carregada: ${st.model.tables.part.rows.length} ${st.model.tables.part.rows.length === 1 ? "participante" : "participantes"}.`); renderNav();
+      if (guardado.interesse && st.sec === "pesquisa") guardado.interesse.model = null;
+      toast(`${SECOES[st.sec].nome}: ${st.model.tables.part.rows.length} ${st.model.tables.part.rows.length === 1 ? UN().replace(/ões$/, "ão").replace(/s$/, "") : UN()} carregad${st.sec === "interesse" ? "as" : "os"}.`); renderNav();
       if (st.page === "dados") location.hash = "painel"; else render();
     };
     const forms = out.filter(o => o.json && Array.isArray(o.json.data)); out.filter(o => !(o.json && Array.isArray(o.json.data))).forEach(o => defs.push(o.json.data && o.json.data.project ? o.json.data.project : o.json.project || o.json));
+    if (tInt) {
+      if (forms.length) concluir(forms, defs, "pesquisa");
+      const MP = window.EMapas; return concluir(D.deInteresse(tInt.head, tInt.rows, MP ? MP.go.shapes.map(s => s.n) : []), [], "interesse");
+    }
     if (outras.length && !forms.length) return planilhaDialog(outras, f2 => concluir(f2, defs));
     if (outras.length) toast("Planilhas que não são do Epicollect foram ignoradas: carregue-as separadamente.", 6000);
-    concluir(forms, defs);
+    concluir(forms, defs, forms.length ? "pesquisa" : null);
   }
   // escolha da aba principal e das colunas que ligam as abas
   function planilhaDialog(abas, pronto) {
@@ -1197,6 +1319,15 @@
     <div class="painelf" style="line-height:1.6;max-width:900px">
       <h3 class="sec" style="margin-top:0">Ligação dos formulários</h3><p>Cada registro do Epicollect tem um identificador (<code>ec5_uuid</code>) e, nos formulários filhos, o identificador do registro-mãe (<code>ec5_parent_uuid</code>). A ferramenta sobe essa cadeia até a ficha de anamnese. Formulários com no máximo um registro por participante (B-IPQ, SF-36) viram colunas da tabela de participantes; os que podem ter vários (B-QUEST, um por dispositivo) viram uma tabela própria, que também carrega os dados do participante.</p>
       <h3 class="sec">Outras entradas</h3><p>O <b>CSV do Epicollect</b> é lido como o JSON (mesmas chaves; respostas de múltipla escolha separadas por vírgula). <b>Planilhas</b> (.xlsx, .ods ou .csv) entram com uma linha por participante na tabela principal e os nomes das perguntas na primeira linha; outras abas se ligam a ela por uma coluna de código (uma linha por participante vira colunas; várias, tabela própria). Os tipos das colunas são reconhecidos pelos valores; colunas com nome, e-mail, telefone, endereço, documentos, prontuário, código do participante ou data de nascimento ficam como identificação. A idade é calculada quando há uma coluna de data de nascimento e outra de data da avaliação/coleta; os escores do B-IPQ, SF-36 e B-QUEST, quando as colunas têm os mesmos nomes do Epicollect.</p>
+      <h3 class="sec">Manifestação de interesse</h3><p>A planilha do formulário público (Google Forms) é reconhecida pelas colunas “Nome do Interessado” e “Produto(s) de interesse” e vai para a seção própria, com base, filtros e regras separados da pesquisa. Cada linha é uma solicitação; as colunas são reconhecidas pelo começo do enunciado, então mudanças pequenas no formulário não quebram a leitura, e perguntas novas entram como colunas comuns. As respostas em texto livre são lidas assim (o texto original fica ao lado, para conferir):</p><ul>
+        <li><b>Produto</b>: pelos códigos do catálogo (1xx adaptações para AVD, 301 acesso digital, 601 órtese craniana, 607 prótese, 701 parapodium, 702 cadeira de alimentação, 801 cadeira de rodas, 802 andador) e por palavras (“parapódio”, “cadeirinha de rodas”, “capacete”, “palmilha”…). Órteses são separadas em membro inferior (pé, perna, joelho, AFO, suropodálica) e superior (mão, punho, braço, cock-up); sem o segmento, “não especificada”. O nome de cada item do catálogo é o mais usado para aquele código na própria base.</li>
+        <li><b>Diagnóstico</b>: grupos por palavras, incluindo as grafias erradas mais comuns (“paralisia celebral”, “mielomeningoncele”); uma pessoa pode ter várias condições. O diagnóstico principal é o primeiro grupo citado numa ordem fixa (paralisia cerebral, mielomeningocele, síndrome de Down, TEA, AVC, lesão medular…).</li>
+        <li><b>Atividades da vida diária</b>: “todas”, “tudo” ou “totalmente dependente” = dependência total; atividades citadas = parcial; “não”/“nenhuma” = nenhuma; “sim” sozinho = sem dizer quais.</li>
+        <li><b>Cidade</b>: comparada sem acentos com os 246 municípios de Goiás, aceitando um erro de digitação, o estado no fim (“Goiânia GO”) e “Ap. Goiânia”. Fora de Goiás fica como digitada.</li>
+        <li><b>Altura e peso</b>: “1,23 m” e “1 metro e 22” viram centímetros; “15kg700g” = 15,7 kg; acima de 300 = gramas.</li>
+        <li><b>Mesma pessoa</b> = mesmo nome (sem acentos nem maiúsculas) e mesma data de nascimento. Reenvio em menos de 30 dias conta uma vez (os produtos do reenvio passam para o pedido mantido); um pedido 30 dias ou mais depois é um novo pedido.</li>
+        <li><b>Atendida no laboratório</b>: com a base da pesquisa também carregada, a pessoa que tem ficha de anamnese (mesmo nome e nascimento). “Dias até a avaliação” = data da 1ª ficha − data da solicitação.</li>
+        <li>Nome, e-mail, telefone, endereço, responsável, fisioterapeuta e data de nascimento ficam como identificação: fora das análises e das exportações.</li></ul>
       <h3 class="sec">Limpeza automática</h3><ul><li>Espaços extras, maiúsculas e acentos: grafias diferentes da mesma resposta são unidas na forma mais frequente (“Goias”, “Góias” → “Goiás”).</li><li>Códigos 999 e 9999 = sem resposta.</li><li>Peso em gramas convertido para kg; valores abaixo de 200 lidos como já digitados em kg; zero = sem resposta.</li><li>Faixas plausíveis: altura 40–210 cm; peso 2–150 kg; Apgar 0–10; comprimento ao nascer 25–60 cm; peso ao nascer 300–6500 g; IMC 8–60. Fora disso, o valor vira “sem resposta” e aparece em Qualidade.</li><li>Textos lidos como número: idade gestacional (“38 semanas e 5 dias” = 38,7), peso ao nascer (“2,115 kg” = 2115 g), duração do parto (horas) e dias de UTIN/UCIN (1 mês = 30 dias).</li><li>Idade = data da avaliação − data de nascimento.</li></ul>
       <h3 class="sec">Escores dos instrumentos</h3>
       <p><b>B-IPQ (Brief Illness Perception Questionnaire)</b>: itens de 0 a 10. Escore total (0–80) = itens 1 (consequências) + 2 (duração) + 5 (identidade) + 6 (preocupação) + 8 (resposta emocional) + (10 − item 3, controle pessoal) + (10 − item 4, controle do tratamento) + (10 − item 7, compreensão). Maior = percepção mais ameaçadora. O item adicional de responsabilidade (pergunta 91) e a questão aberta de causas não entram. Só é calculado com os 8 itens respondidos.</p>
@@ -1213,7 +1344,8 @@
   // ---------------- navegação
   function renderNav() {
     const m = st.model;
-    $("#baseInfo").innerHTML = m ? `<b>${m.tables.part.rows.length} participantes</b><br>${m.forms.map(f => `${esc(f.nome.replace(/\s*\(.*\)/, ""))}: ${f.n}`).join("<br>")}<br>Última ficha: ${esc((m.tables.part.rows.map(r => r.d_data).filter(Boolean).sort().pop() || "").split("-").reverse().join("/"))}<br><span style="opacity:.8">Dados só neste navegador.</span>` : "Nenhuma base carregada.";
+    $$("#secao [data-sec]").forEach(b => { const on = b.dataset.sec === st.sec; b.classList.toggle("on", on); b.setAttribute("aria-pressed", String(on)); });
+    $("#baseInfo").innerHTML = m ? `<b>${m.tables.part.rows.length} ${UN()}</b><br>${m.forms.map(f => `${esc(f.nome.replace(/\s*\(.*\)/, ""))}: ${f.n}`).join("<br>")}<br>${ehInteresse() ? "Última solicitação" : "Última ficha"}: ${esc((m.tables.part.rows.map(r => r.d_data).filter(Boolean).sort().pop() || "").split("-").reverse().join("/"))}<br><span style="opacity:.8">Dados só neste navegador.</span>` : "Nenhuma base carregada.";
     const qe = m ? m.quality.filter(q => q.sev === "erro").length : 0; $("#qCnt").hidden = !qe; $("#qCnt").textContent = qe;
   }
   function render() {
@@ -1226,6 +1358,7 @@
     catch (e) { console.error(e); pg.innerHTML = `<p class="box erro">Algo deu errado nesta tela: ${esc(e.message)}</p>`; }
   }
   window.addEventListener("hashchange", () => { $("#pag").scrollTop = 0; window.scrollTo(0, 0); $("#nav").classList.remove("aberto"); $("#navBtn").setAttribute("aria-expanded", "false"); $("#navBtn").textContent = "Menu"; render(); });
+  $("#secao").addEventListener("click", e => { const b = e.target.closest("[data-sec]"); if (b) trocarSecao(b.dataset.sec); });
   $("#navBtn").addEventListener("click", () => { const o = $("#nav").classList.toggle("aberto"); $("#navBtn").setAttribute("aria-expanded", String(o)); $("#navBtn").textContent = o ? "Fechar" : "Menu"; });
 
   // aberto dentro de outro site (ex.: Google Sites incorporando o GitHub Pages): oferece a tela cheia,
@@ -1241,7 +1374,11 @@
   // início
   (async () => {
     renderNav(); render(); repLoad();
-    try { const b = await idbGet(); if (b && b.raw && b.raw.length && !st.raw.length) { st.raw = b.raw; st.defs = b.defs || []; rebuild(); renderNav(); render(); } } catch (e) { }
+    try {
+      const outra = st.sec === "pesquisa" ? "interesse" : "pesquisa";
+      const bo = await idbGet(outra).catch(() => null); if (bo && bo.raw && bo.raw.length && !(guardado[outra] && guardado[outra].raw.length)) guardado[outra] = Object.assign(estadoVazio(outra), { raw: bo.raw, defs: bo.defs || [] });
+      const b = await idbGet(); if (b && b.raw && b.raw.length && !st.raw.length) { st.raw = b.raw; st.defs = b.defs || []; rebuild(); renderNav(); render(); }
+    } catch (e) { }
   })();
   window.EITA_DADOS = { st, loadFiles, rebuild, render }; // para testes
 })();

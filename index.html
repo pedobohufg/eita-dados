@@ -52,6 +52,10 @@ label.chk{display:inline-flex;gap:7px;align-items:center;font-size:13px;cursor:p
 #nav a:hover{background:rgba(255,255,255,.06)}
 #nav a.cur{background:rgba(149,96,253,.26);color:#fff;border-left-color:#B79BFF}
 #nav a .cnt{margin-left:auto;font-size:11.5px;background:#B79BFF;color:#22164A;border-radius:999px;padding:0 7px}
+#secao{display:flex;flex-direction:column;gap:4px;margin:4px 0 12px;padding:4px;background:rgba(255,255,255,.06);border-radius:var(--r)}
+#secao button{all:unset;cursor:pointer;padding:8px 10px;border-radius:calc(var(--r) - 2px);font-size:13px;font-weight:600;color:#CFC6F2;line-height:1.25}
+#secao button:hover{background:rgba(255,255,255,.07)}#secao button:focus-visible{outline:2px solid #B79BFF}
+#secao button.on{background:#F4F0FF;color:#22164A}
 #nav .sep{height:1px;background:rgba(255,255,255,.1);margin:10px 6px}
 #nav .base{margin-top:auto;padding:12px 8px 0;border-top:1px solid rgba(255,255,255,.1);font-size:11.5px;color:#A99FCF;line-height:1.5}
 #nav .base b{color:#fff;font-weight:600}
@@ -139,7 +143,7 @@ svg .hov path,svg .hov rect:not([fill=transparent]){filter:brightness(1.08)}
 #navBtn{display:none}
 @media (max-width:860px){#app{grid-template-columns:1fr;height:auto}#nav{position:sticky;top:0;z-index:30;padding:10px 12px;padding-top:max(10px,env(safe-area-inset-top))}#nav .marca{padding:0}#nav .marca img{width:34px;height:34px}#nav .marca h1{font-size:21px}
 #navBtn{display:block;margin-left:auto;background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.25);color:#fff}
-#nav a,#nav .sep,#nav .base{display:none}#nav.aberto a{display:flex}#nav.aberto{max-height:100vh;overflow-y:auto}#nav.aberto .marca{padding-bottom:8px}#main{overflow:visible}#pag{overflow:visible;padding:18px 14px 60px}#topo{padding:10px 14px}.vars{grid-template-columns:1fr}.vlist{max-height:40vh}}
+#nav a,#nav .sep,#nav .base,#secao{display:none}#nav.aberto a,#nav.aberto #secao{display:flex}#nav.aberto{max-height:100vh;overflow-y:auto}#nav.aberto .marca{padding-bottom:8px}#main{overflow:visible}#pag{overflow:visible;padding:18px 14px 60px}#topo{padding:10px 14px}.vars{grid-template-columns:1fr}.vlist{max-height:40vh}}
 .perigo{color:var(--aviso);border-color:#E3B38F}
 .rep-body .card{grid-column:span 12}
 details.ajuda,details.codigo{background:#fff;border:1px solid var(--linha);border-radius:8px;margin-bottom:14px}
@@ -165,6 +169,7 @@ ul.lk li{margin:3px 0}ul.lk a,.ajb a{color:var(--violeta-fundo)}
 <div id="app">
 <nav id="nav" aria-label="Seções">
   <div class="marca"><img src="assets/logo-labeita-simbolo.png" alt="Lab.EITA"><h1><small>Lab.EITA</small>EITA! DADOS</h1><button type="button" id="navBtn" aria-expanded="false" aria-controls="nav">Menu</button></div>
+  <div id="secao" role="group" aria-label="Seção"><button type="button" data-sec="interesse" aria-pressed="false">Manifestação de interesse</button><button type="button" data-sec="pesquisa" aria-pressed="false">Pesquisa no laboratório</button></div>
   <a href="#painel" data-p="painel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>Painel</a>
   <a href="#mapa" data-p="mapa"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>Mapa</a>
   <a href="#explorar" data-p="explorar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Explorar</a>
@@ -197,6 +202,7 @@ ul.lk li{margin:3px 0}ul.lk a,.ajb a{color:var(--violeta-fundo)}
 <script src="instrumentos.js"></script>
 <script src="mapas.js"></script>
 <script src="dados.js"></script>
+<script src="interesse.js"></script>
 <script src="graficos.js"></script>
 <script src="guia.js"></script>
 <script src="app.js"></script>
