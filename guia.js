@@ -125,7 +125,7 @@
   // Seções gerais do guia
   const S = [
     { id: "passos", titulo: "Roteiro: do Epicollect ao artigo", html: `<ol>
-      <li><b>Carregue</b> a exportação do Epicollect (tela Dados) e confira as <b>regras de inclusão</b>.</li>
+      <li><b>Carregue</b> a exportação do Epicollect (JSON ou CSV) ou uma planilha do Excel (tela Dados) e confira as <b>regras de inclusão</b>.</li>
       <li><b>Limpe</b>: na tela Qualidade, corrija no Epicollect o que for erro de digitação; na tela Variáveis, junte categorias escritas de jeitos diferentes. Exporte as regras para a equipe usar as mesmas.</li>
       <li><b>Defina a pergunta</b> antes de testar: qual é o desfecho, quais são os grupos ou preditores. Escreva isso no projeto.</li>
       <li><b>Descreva</b> a amostra (Tabela para artigo) e o fluxo dos participantes (Fluxograma).</li>

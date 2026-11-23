@@ -229,7 +229,7 @@
     const idades = rows.map(r => r.d_idade).filter(x => x != null);
     const q = Object.values(m.tables).find(t => t.id !== "part");
     const k = [
-      ["Participantes", rows.length, rows.length !== all.length ? `de ${all.length} no total` : "fichas de anamnese"],
+      ["Participantes", rows.length, rows.length !== all.length ? `de ${all.length} no total` : (m.forms[0] && m.forms[0].planilha ? "linhas da tabela principal" : "fichas de anamnese")],
       V("d_idade") && ["Idade", idades.length ? fmt(S.median(idades), 1) + " anos" : "—", idades.length ? `mediana · IIQ ${fmt(S.quantile(idades, .25), 1)}–${fmt(S.quantile(idades, .75), 1)}` : ""],
       V("7_Sexo") && ["Sexo feminino", rows.length ? fmt(100 * rows.filter(r => r["7_Sexo"] === "Feminino").length / rows.filter(r => r["7_Sexo"]).length, 0) + "%" : "—", `${rows.filter(r => r["7_Sexo"] === "Feminino").length} participantes`],
       ...m.forms.filter(f => f.rel === "1:1").map(f => [f.nome.replace(/\s*\(.*\)/, ""), rows.filter(r => r["_has_" + f.slug]).length, `responderam (${fmt(100 * rows.filter(r => r["_has_" + f.slug]).length / Math.max(1, rows.length), 0)}%)`]),
@@ -240,7 +240,7 @@
     if (!rows.length) { g.innerHTML = `<div class="card w12"><p class="vazio">Nenhum participante com os filtros atuais.</p></div>`; return; }
     const cut = s => s.replace(/^(Supino|Prono|Sentado|Em pé):\s*/, "$1 · ").replace(/^SF-36\s+/, "").replace(/^B-IPQ\s+\d\s·\s/, "").replace(/^B-QUEST\s+\d+\s·\s/, "").replace(/\*$/, "");
     catCard(g, "d_diag", { title: "Diagnóstico" });
-    catCard(g, "d_faixa", { w: 3, vertical: true, title: "Faixa etária" });
+    catCard(g, "d_faixa", { w: V("7_Sexo") ? 3 : 6, vertical: true, title: "Faixa etária" });
     catCard(g, "7_Sexo", { w: 3, title: "Sexo" });
     mapCards(g, { compact: true });
     catCard(g, "d_mes", { vertical: true, title: "Avaliações por mês" });
@@ -259,6 +259,14 @@
     if (V("s_bipq")) { meansCard(g, D.bipqItems, { title: "B-IPQ: itens (0–10)", domain: [0, 10], short: cut, sub: "Percepção do responsável sobre a doença · média e IC 95%" }); numCard(g, "s_bipq", { title: "B-IPQ: escore total (0–80)" }); }
     if (D.sfDomains && V("s_sf_cf")) boxCard(g, D.sfDomains, { title: "SF-36 do responsável: domínios (0–100)", w: 12, domain: [0, 100], short: cut, sub: "0 = pior, 100 = melhor · ◆ média · caixa = mediana e quartis" });
     if (D.questItems && V(D.questItems[0])) { meansCard(g, D.questItems, { title: "B-QUEST: satisfação por item (1–5)", domain: [1, 5], short: cut }); catCard(g, "146_Qual_o_dispositi", { title: "Dispositivos avaliados no B-QUEST" }); }
+    // planilhas e formulários de outras coletas: um gráfico para cada pergunta (até 16)
+    if (g.children.length < 6) {
+      const ja = new Set([...g.querySelectorAll(".card h4")].map(h => h.textContent));
+      varList({ table: "part", types: ["cat", "num", "multi"], noVirtual: true }).filter(v => v.raw && !ja.has(v.label)).slice(0, 16).forEach(v => {
+        if (v.type === "num") numCard(g, v.id, { w: 6 });
+        else if ((v.levels || []).length <= 25) catCard(g, v.id, { w: 6, top: 12, vertical: v.ordinal });
+      });
+    }
     // gráficos fixados no explorador
     st.cfg.pins.forEach((p, i) => { try { exploreCard(g, Object.assign({}, p, { pin: i })); } catch (e) { } });
   }
@@ -446,7 +454,7 @@
     st.preset = null;
   }
   function statDesc(b, pre) {
-    const defs = (pre.vars || ["d_idade", "7_Sexo", "d_diag", "s_bipq"]).filter(V);
+    let defs = (pre.vars || ["d_idade", "7_Sexo", "d_diag", "s_bipq"]).filter(V); if (defs.length < 2) defs = defs.concat(varList({ types: ["num", "cat"], noVirtual: true }).filter(v => v.raw).slice(0, 6).map(v => v.id));
     b.innerHTML = `<div class="painelf"><div class="campos" style="grid-template-columns:2fr 1fr"><div><div class="note" style="font-weight:600;margin-bottom:5px">Variáveis</div>${varChecks("dv", { types: ["num", "cat", "multi"], noVirtual: true }, defs)}</div>
       <div><label class="note" style="font-weight:600;display:block;margin-bottom:5px">Separar por grupo (opcional)</label>${varSelect("dg", { none: "— sem grupos —", types: ["cat"] })}<p class="note">Números: n, média, desvio padrão, mediana, intervalo interquartil e teste de Shapiro-Wilk. Categorias: frequências e porcentagens sobre quem respondeu.</p><button class="primary" type="button" id="dGo">Calcular</button></div></div></div><div id="dOut"></div>`;
     const go = () => {
@@ -934,6 +942,7 @@
   function pageTabela1(pg) {
     const t = st.model.tables[st.table];
     const def = ["7_Sexo", "d_idade", "d_faixa", "d_diag", "d_prematuro", "43_Escolaridade", "42_Situao_Profission", "76_Comunicao_e_cogni", "d_motor", "s_bipq", ...(D.sfDomains || [])].filter(k => V(k) && t.vars.includes(k));
+    if (def.length < 3) varList({ types: ["num", "cat"], noVirtual: true }).filter(v => v.raw && !def.includes(v.id)).slice(0, 8).forEach(v => def.push(v.id));
     pg.innerHTML = `<div class="cab"><div><h2>Tabela para artigo</h2><p>A “Tabela 1” de caracterização da amostra, no formato das revistas: números como média ± DP ou mediana [IIQ] conforme a normalidade, categorias como n (%), e o valor de p da comparação entre grupos, com o teste indicado em nota.</p></div></div>
       ${helpBox("tabela1")}<div class="painelf"><div class="campos" style="grid-template-columns:2fr 1fr"><div><div class="note" style="font-weight:600;margin-bottom:5px">Linhas da tabela</div>${varChecks("t1", { types: ["num", "cat"], noVirtual: false }, def)}</div>
       <div style="display:flex;flex-direction:column;gap:10px"><label class="note" style="font-weight:600">Comparar por (colunas)${varSelect("t1g", { types: ["cat"], none: "— só a amostra total —", value: "" })}</label>
@@ -1091,8 +1100,8 @@
   function pageDados(pg) {
     const m = st.model;
     pg.innerHTML = `<div class="cab"><div><h2>Dados</h2><p>Carregue a exportação do Epicollect5. Os arquivos são lidos <b>só neste navegador</b>: nada é enviado para servidores, nem para o Claude.</p></div></div>
-      <div class="drop" id="drop" tabindex="0" role="button"><b>Solte aqui o .zip exportado do Epicollect</b>ou os arquivos .json de cada formulário · clique para escolher<br><span class="note">No Epicollect: projeto → Download → formato JSON → todas as fichas. Pode incluir também a “definição do projeto” para trazer os enunciados completos das perguntas.</span></div>
-      <input type="file" id="fi" accept=".zip,.json,application/json,application/zip" multiple hidden>
+      <div class="drop" id="drop" tabindex="0" role="button"><b>Solte aqui o .zip exportado do Epicollect</b>ou arquivos .json, .csv e planilhas do Excel (.xlsx) · clique para escolher<br><span class="note">No Epicollect: projeto → Download → JSON ou CSV → todas as fichas. Pode incluir a “definição do projeto” para trazer os enunciados completos. Planilhas de outras coletas também entram: uma linha por participante, nomes das perguntas na primeira linha.</span></div>
+      <input type="file" id="fi" accept=".zip,.json,.csv,.tsv,.txt,.xlsx,.xlsm,.xls,.ods,application/json,application/zip,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" multiple hidden>
       <div id="dInfo" style="margin-top:16px"></div>`;
     const drop = $("#drop"), fi = $("#fi");
     drop.onclick = () => fi.click(); drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fi.click(); } };
@@ -1115,23 +1124,71 @@
     }
   }
   async function loadFiles(files) {
-    const out = [], defs = [];
+    const out = [], defs = [], tabelas = [];
+    const lerPlanilha = async (nome, buf) => {
+      await loadScript(XLSX_URL); const X = window.XLSX, wb = X.read(buf, { type: "array", cellDates: true });
+      wb.SheetNames.forEach(sn => { const m = X.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: "" }).filter(r => r.some(c => String(c).trim() !== ""));
+        if (m.length > 1) tabelas.push({ nome: wb.SheetNames.length > 1 ? sn : nome.replace(/\.[^.]+$/, ""), arquivo: nome, head: m[0].map(h => String(h).replace(/\s+/g, " ").trim()), rows: m.slice(1) }); });
+    };
+    const lerCSV = (nome, txt) => { const t = D.parseCSV(txt); if (t.rows.length) tabelas.push({ nome: nome.replace(/\.[^.]+$/, ""), arquivo: nome, head: t.head, rows: t.rows }); };
     try {
       for (const f of files) {
         if (/\.zip$/i.test(f.name)) {
           await loadScript(JSZIP); const z = await window.JSZip.loadAsync(f);
-          for (const [name, entry] of Object.entries(z.files)) { if (entry.dir || !/\.json$/i.test(name) || /__MACOSX/.test(name)) continue; out.push({ name: name.split("/").pop(), json: JSON.parse(await entry.async("string")) }); }
+          for (const [name, entry] of Object.entries(z.files)) {
+            if (entry.dir || /__MACOSX/.test(name)) continue; const nm = name.split("/").pop();
+            if (/\.json$/i.test(name)) out.push({ name: nm, json: JSON.parse(await entry.async("string")) });
+            else if (/\.(csv|tsv|txt)$/i.test(name)) lerCSV(nm, await entry.async("string"));
+            else if (/\.(xlsx|xlsm|xls|ods)$/i.test(name)) await lerPlanilha(nm, await entry.async("uint8array"));
+          }
         } else if (/\.json$/i.test(f.name)) out.push({ name: f.name, json: JSON.parse(await f.text()) });
+        else if (/\.(csv|tsv|txt)$/i.test(f.name)) lerCSV(f.name, await f.text());
+        else if (/\.(xlsx|xlsm|xls|ods)$/i.test(f.name)) await lerPlanilha(f.name, new Uint8Array(await f.arrayBuffer()));
       }
-    } catch (e) { toast("Não consegui ler: " + e.message, 6000); return; }
+    } catch (e) { toast("Não consegui ler: " + e.message + (/xls|ods/i.test(e.message + files.map(f => f.name).join()) ? " — salve a planilha como .xlsx ou .csv e tente de novo." : ""), 7000); return; }
+    // tabelas exportadas pelo Epicollect (CSV, ou CSV aberto e salvo no Excel) entram como os JSON
+    tabelas.filter(t => D.ehEpicollect(t.head)).forEach(t => out.push(D.deEpicollectCSV(/form-\d+__/.test(t.arquivo) ? t.arquivo : t.nome + ".csv", t.head, t.rows)));
+    const outras = tabelas.filter(t => !D.ehEpicollect(t.head));
+    const concluir = (forms, novasDefs) => {
+      if (!forms.length && novasDefs.length && st.raw.length) { st.defs = novasDefs; }
+      else if (!forms.length) { toast("Nenhum dado encontrado nesses arquivos (use a exportação do Epicollect, um .csv ou uma planilha do Excel).", 6000); return; }
+      else { st.raw = forms; if (novasDefs.length) st.defs = novasDefs; else if (forms.some(f => f.planilha)) st.defs = []; }
+      try { rebuild(); } catch (e) { toast("Erro ao montar a base: " + e.message, 7000); console.error(e); return; }
+      if (st.cfg.persist) idbPut({ raw: st.raw, defs: st.defs }).catch(() => { });
+      toast(`Base carregada: ${st.model.tables.part.rows.length} ${st.model.tables.part.rows.length === 1 ? "participante" : "participantes"}.`); renderNav();
+      if (st.page === "dados") location.hash = "painel"; else render();
+    };
     const forms = out.filter(o => o.json && Array.isArray(o.json.data)); out.filter(o => !(o.json && Array.isArray(o.json.data))).forEach(o => defs.push(o.json.data && o.json.data.project ? o.json.data.project : o.json.project || o.json));
-    if (!forms.length && defs.length && st.raw.length) { st.defs = defs; } // só a definição do projeto
-    else if (!forms.length) { toast("Nenhum formulário do Epicollect encontrado nesses arquivos.", 5000); return; }
-    else { st.raw = forms; if (defs.length) st.defs = defs; }
-    try { rebuild(); } catch (e) { toast("Erro ao montar a base: " + e.message, 7000); console.error(e); return; }
-    if (st.cfg.persist) idbPut({ raw: st.raw, defs: st.defs }).catch(() => { });
-    toast(`Base carregada: ${st.model.tables.part.rows.length} participantes.`); renderNav();
-    if (st.page === "dados") location.hash = "painel"; else render();
+    if (outras.length && !forms.length) return planilhaDialog(outras, f2 => concluir(f2, defs));
+    if (outras.length) toast("Planilhas que não são do Epicollect foram ignoradas: carregue-as separadamente.", 6000);
+    concluir(forms, defs);
+  }
+  // escolha da aba principal e das colunas que ligam as abas
+  function planilhaDialog(abas, pronto) {
+    const palpiteId = h => { const ks = h.map(c => D.key(c)); let i = ks.findIndex(k => /^(ec5uuid|id|idparticipante|cod|codigo|codigodoparticipante|codigodopaciente|participante|paciente|prontuario|registro|numero)$/.test(k)); if (i < 0) i = ks.findIndex(k => /^(codigo|id)/.test(k)); return i; };
+    let princ = 0; abas.forEach((a, i) => { if (a.rows.length > abas[princ].rows.length && palpiteId(a.head) >= 0) princ = i; });
+    dialog(`<h3>Importar planilha</h3><p class="note">${abas.length > 1 ? `${abas.length} abas encontradas.` : "Uma tabela encontrada."} A ferramenta espera <b>uma linha por participante</b> na tabela principal, com os nomes das perguntas na primeira linha. Outras abas (por exemplo, dispositivos ou reavaliações) se ligam à principal por uma coluna de código.</p>
+      <label class="note" style="display:block;font-weight:600;margin:12px 0 4px">Tabela principal (participantes)</label><select id="ipP" style="width:100%">${abas.map((a, i) => `<option value="${i}"${i === princ ? " selected" : ""}>${esc(a.nome)} — ${a.rows.length} linhas, ${a.head.length} colunas</option>`).join("")}</select>
+      <label class="note" style="display:block;font-weight:600;margin:12px 0 4px">Coluna com o código de cada participante</label><select id="ipId" style="width:100%"></select>
+      <div id="ipOut" style="margin-top:12px"></div>
+      <p class="note" style="margin-top:12px">Colunas com nome, e-mail, telefone, endereço, documentos ou data de nascimento são tratadas como identificação: ficam fora das análises e das exportações (cada pessoa aparece como um código EITA). A data de nascimento é usada só para calcular a idade.</p>
+      <div class="row" style="justify-content:flex-end;margin-top:14px"><button type="button" data-close>Cancelar</button><button class="primary" type="button" id="ipOk">Importar</button></div>`, el => {
+      const desenha = () => {
+        const p = +el.querySelector("#ipP").value, a = abas[p], g = palpiteId(a.head);
+        el.querySelector("#ipId").innerHTML = `<option value="">— cada linha é um participante (sem código) —</option>` + a.head.map((h, i) => `<option value="${esc(h)}"${i === g ? " selected" : ""}>${esc(h)}</option>`).join("");
+        const id = () => el.querySelector("#ipId").value;
+        const outrasHtml = () => abas.map((b, k) => { if (k === p) return ""; const sug = b.head.find(h => D.key(h) === D.key(id())) || "";
+          return `<div class="row" style="margin:6px 0"><span style="min-width:180px"><b>${esc(b.nome)}</b> <span class="note">(${b.rows.length} linhas)</span></span><select data-aba="${k}"><option value="">não importar</option>${b.head.map(h => `<option value="${esc(h)}"${h === sug ? " selected" : ""}>ligar pela coluna “${esc(h)}”</option>`).join("")}</select></div>`; }).join("");
+        const upd = () => { el.querySelector("#ipOut").innerHTML = abas.length > 1 ? `<div class="note" style="font-weight:600;margin-bottom:4px">Outras abas</div>${outrasHtml()}${id() ? "" : '<p class="note">Sem código na tabela principal, as outras abas não podem ser ligadas.</p>'}` : ""; };
+        el.querySelector("#ipId").onchange = upd; upd();
+      };
+      el.querySelector("#ipP").onchange = desenha; desenha();
+      el.querySelector("#ipOk").onclick = () => {
+        const p = +el.querySelector("#ipP").value, idCol = el.querySelector("#ipId").value || null, lig = {};
+        el.querySelectorAll("[data-aba]").forEach(s => { if (s.value && idCol) lig[+s.dataset.aba] = s.value; });
+        const forms = D.dePlanilhas(abas, { principal: p, idCol, ligacoes: lig }); closeDlg(); pronto(forms);
+      };
+    });
   }
 
   // ---------------- COMO CALCULAMOS
@@ -1139,6 +1196,7 @@
     pg.innerHTML = `<div class="cab"><div><h2>Como calculamos</h2><p>Referência das regras usadas pela ferramenta, para conferir e citar nos métodos.</p></div></div>
     <div class="painelf" style="line-height:1.6;max-width:900px">
       <h3 class="sec" style="margin-top:0">Ligação dos formulários</h3><p>Cada registro do Epicollect tem um identificador (<code>ec5_uuid</code>) e, nos formulários filhos, o identificador do registro-mãe (<code>ec5_parent_uuid</code>). A ferramenta sobe essa cadeia até a ficha de anamnese. Formulários com no máximo um registro por participante (B-IPQ, SF-36) viram colunas da tabela de participantes; os que podem ter vários (B-QUEST, um por dispositivo) viram uma tabela própria, que também carrega os dados do participante.</p>
+      <h3 class="sec">Outras entradas</h3><p>O <b>CSV do Epicollect</b> é lido como o JSON (mesmas chaves; respostas de múltipla escolha separadas por vírgula). <b>Planilhas</b> (.xlsx, .ods ou .csv) entram com uma linha por participante na tabela principal e os nomes das perguntas na primeira linha; outras abas se ligam a ela por uma coluna de código (uma linha por participante vira colunas; várias, tabela própria). Os tipos das colunas são reconhecidos pelos valores; colunas com nome, e-mail, telefone, endereço, documentos, prontuário, código do participante ou data de nascimento ficam como identificação. A idade é calculada quando há uma coluna de data de nascimento e outra de data da avaliação/coleta; os escores do B-IPQ, SF-36 e B-QUEST, quando as colunas têm os mesmos nomes do Epicollect.</p>
       <h3 class="sec">Limpeza automática</h3><ul><li>Espaços extras, maiúsculas e acentos: grafias diferentes da mesma resposta são unidas na forma mais frequente (“Goias”, “Góias” → “Goiás”).</li><li>Códigos 999 e 9999 = sem resposta.</li><li>Peso em gramas convertido para kg; valores abaixo de 200 lidos como já digitados em kg; zero = sem resposta.</li><li>Faixas plausíveis: altura 40–210 cm; peso 2–150 kg; Apgar 0–10; comprimento ao nascer 25–60 cm; peso ao nascer 300–6500 g; IMC 8–60. Fora disso, o valor vira “sem resposta” e aparece em Qualidade.</li><li>Textos lidos como número: idade gestacional (“38 semanas e 5 dias” = 38,7), peso ao nascer (“2,115 kg” = 2115 g), duração do parto (horas) e dias de UTIN/UCIN (1 mês = 30 dias).</li><li>Idade = data da avaliação − data de nascimento.</li></ul>
       <h3 class="sec">Escores dos instrumentos</h3>
       <p><b>B-IPQ (Brief Illness Perception Questionnaire)</b>: itens de 0 a 10. Escore total (0–80) = itens 1 (consequências) + 2 (duração) + 5 (identidade) + 6 (preocupação) + 8 (resposta emocional) + (10 − item 3, controle pessoal) + (10 − item 4, controle do tratamento) + (10 − item 7, compreensão). Maior = percepção mais ameaçadora. O item adicional de responsabilidade (pergunta 91) e a questão aberta de causas não entram. Só é calculado com os 8 itens respondidos.</p>

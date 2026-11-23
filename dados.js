@@ -76,13 +76,79 @@
         const slug = f.name.replace(/\.json$/i, "").replace(/^.*\//, "");
         const ord = (slug.match(/form-(\d+)/) || [0, 99])[1];
         const known = I.FORMS.find(k => k.re.test(slug));
-        forms.push({ slug, ord: +ord, nome: known ? known.nome : slug.replace(/^form-\d+__/, "").replace(/[-_]+/g, " "), unidade: known && known.unidade, records: j.data });
+        forms.push({ slug, ord: +ord, nome: f.planilha || (known ? known.nome : slug.replace(/^form-\d+__/, "").replace(/[-_]+/g, " ")), unidade: known ? known.unidade : (f.planilha ? "registros" : undefined), planilha: f.planilha || null, records: j.data });
       } else if (j && j.data && j.data.project) defs.push(j.data.project); // definição do projeto
       else if (j && j.project && j.project.forms) defs.push(j.project);
     }
     forms.sort((a, b) => a.ord - b.ord);
     return { forms, defs };
   };
+
+  // ---------- planilhas (CSV do Epicollect, .csv e .xlsx quaisquer)
+  D.parseCSV = text => {
+    text = String(text).replace(/^﻿/, "");
+    const first = text.split(/\r?\n/, 1)[0] || "", cnt = c => (first.match(new RegExp(c === "|" ? "\\|" : c, "g")) || []).length;
+    const sep = [";", ",", "\t"].sort((a, b) => cnt(b) - cnt(a))[0];
+    const rows = []; let row = [], cur = "", q = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (q) { if (ch === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += ch; }
+      else if (ch === '"') q = true;
+      else if (ch === sep) { row.push(cur); cur = ""; }
+      else if (ch === "\n" || ch === "\r") { if (ch === "\r" && text[i + 1] === "\n") i++; row.push(cur); rows.push(row); row = []; cur = ""; }
+      else cur += ch;
+    }
+    if (cur !== "" || row.length) { row.push(cur); rows.push(row); }
+    const clean = rows.filter(r => r.some(c => String(c).trim() !== ""));
+    return { head: (clean[0] || []).map(h => tidy(h)), rows: clean.slice(1), sep };
+  };
+  // valor de célula de planilha → texto/número no formato do Epicollect
+  const celula = v => {
+    if (v instanceof Date) { if (isNaN(v)) return ""; return String(v.getDate()).padStart(2, "0") + "/" + String(v.getMonth() + 1).padStart(2, "0") + "/" + v.getFullYear(); }
+    if (v === true) return "Sim"; if (v === false) return "Não";
+    if (v == null) return ""; return typeof v === "number" ? v : String(v).trim();
+  };
+  D.celula = celula;
+  D.ehEpicollect = head => head.includes("ec5_uuid");
+  // CSV exportado pelo Epicollect: mesmas chaves do JSON; múltipla escolha vem numa célula, separada por vírgula
+  D.deEpicollectCSV = (nome, head, rows) => {
+    const data = rows.map(r => { const o = {}; head.forEach((h, i) => { let v = celula(r[i]); if (h && I.F[h] && I.F[h].type === "multi") v = v === "" ? [] : String(v).split(/\s*,\s+/).map(tidy).filter(Boolean); o[h] = v; }); return o; });
+    return { name: nome.replace(/\.(csv|tsv|txt|xlsx?|ods)$/i, ".json"), json: { data } };
+  };
+  // identificador estável no formato de uuid, a partir de um texto (código do participante ou aba + linha)
+  D.uuidDe = txt => { let h1 = 0x811c9dc5, h2 = 0x01000193, h3 = 0x9e3779b9, h4 = 0x7f4a7c15; const s = String(txt);
+    for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); h1 = Math.imul(h1 ^ c, 0x01000193); h2 = Math.imul(h2 ^ c, 0x5bd1e995); h3 = Math.imul(h3 ^ c, 0x27d4eb2d); h4 = Math.imul(h4 ^ c, 0x165667b1); }
+    const x = [h1, h2, h3, h4].map(h => (h >>> 0).toString(16).padStart(8, "0")).join(""); return `${x.slice(0, 8)}-${x.slice(8, 12)}-4${x.slice(13, 16)}-8${x.slice(17, 20)}-${x.slice(20, 32)}`; };
+  // planilha qualquer: uma aba principal (uma linha por participante) e abas ligadas por uma coluna de código
+  // abas: [{nome, head, rows}]; cfg: {principal, idCol, ligacoes: {indiceDaAba: coluna}}
+  D.dePlanilhas = (abas, cfg) => {
+    const slug = t => D.key(t).slice(0, 30) || "aba";
+    const p = abas[cfg.principal], idI = cfg.idCol ? p.head.indexOf(cfg.idCol) : -1, out = [], porCodigo = new Map(), vistos = new Map();
+    const reg = (aba, r, extra) => { const o = Object.assign({}, extra); aba.head.forEach((h, i) => { if (h) o[h] = celula(r[i]); }); return o; };
+    const dataP = p.rows.map((r, i) => {
+      const cod = idI >= 0 ? String(celula(r[idI])) : "";
+      let base = cod ? "id:" + D.key(cod) : `linha:${p.nome}:${i}`; const n = (vistos.get(base) || 0) + 1; vistos.set(base, n); if (n > 1) base += "#" + n;
+      const u = D.uuidDe(base); if (cod && !porCodigo.has(D.key(cod))) porCodigo.set(D.key(cod), u);
+      const o = reg(p, r, { ec5_uuid: u }); if (idI >= 0) { o["Código do participante (" + p.head[idI] + ")"] = o[p.head[idI]]; delete o[p.head[idI]]; }
+      return o;
+    });
+    out.push({ name: `form-1__${slug(p.nome)}.json`, json: { data: dataP }, planilha: p.nome });
+    const usados = new Set(p.head);
+    abas.forEach((a, k) => {
+      if (k === cfg.principal) return; const col = cfg.ligacoes && cfg.ligacoes[k]; if (!col) return;
+      const li = a.head.indexOf(col); if (li < 0) return;
+      const data = a.rows.map((r, i) => {
+        const cod = D.key(String(celula(r[li]))), pai = porCodigo.get(cod) || null;
+        const o = { ec5_uuid: D.uuidDe(`linha:${a.nome}:${i}`), ec5_parent_uuid: pai || D.uuidDe("sem-par:" + cod) };
+        a.head.forEach((h, j) => { if (!h || j === li) return; const nomeCol = usados.has(h) ? `${h} (${a.nome})` : h; o[nomeCol] = celula(r[j]); });
+        return o;
+      });
+      out.push({ name: `form-${out.length + 1}__${slug(a.nome)}.json`, json: { data }, planilha: a.nome });
+    });
+    return out;
+  };
+  // colunas que identificam pessoas (planilhas e formulários fora dos conhecidos)
+  D.pareceIdentificacao = lbl => /\b(nome|e-?mail|telefone|celular|whats|cpf|rg|cns|cart[aã]o sus|endere[cç]o|rua|bairro|cep|foto|assinatura|prontu[aá]rio|c[oó]digo do participante)\b|nascimento/i.test(deacc(String(lbl)).replace(/_/g, " ")) || /nome|nascimento|endere|telefone|e-?mail/i.test(deacc(String(lbl)));
 
   // enunciados completos a partir da definição do projeto do Epicollect (opcional)
   function labelsFromDefs(defs) {
@@ -94,7 +160,7 @@
 
   // ---------- modelo
   D.build = function (forms, opts) {
-    opts = opts || {}; const recodes = opts.recodes || {}; const defLabels = labelsFromDefs(opts.defs || []);
+    opts = opts || {}; D.sfDomains = D.sfItems = D.bipqItems = D.questItems = D.munField = null; D.nReav = 0; const recodes = opts.recodes || {}; const defLabels = labelsFromDefs(opts.defs || []);
     const vars = {}, quality = [], log = [];
     const addVar = (id, m) => { vars[id] = Object.assign({ id, type: "cat", section: "Outros", label: id }, vars[id] || {}, m); return vars[id]; };
     const Q = (sev, varId, pid, msg, val) => quality.push({ sev, var: varId, pid, msg, val: val === undefined ? "" : String(val) });
@@ -159,7 +225,9 @@
         let type = (opts.types && opts.types[k]) || known.type || inferType(vals);
         const fromDef = defLabels.find(q => D.key(q).startsWith(D.key(k.replace(/^\d+_/, "")).slice(0, 12)));
         const label = known.label || (fromDef ? fromDef : tidy(k.replace(/^\d+_/, "").replace(/_/g, " ")));
-        const meta = addVar(k, { label, fullQuestion: fromDef || null, section: known.section || f.nome, type, form: f.nome, formSlug: f.slug, source: "Epicollect", pii: !!known.pii, hide: !!known.hide, unit: known.unit || "", raw: true, key: k });
+        const piiGuess = !I.F[k] && D.pareceIdentificacao(label);
+        if (piiGuess && type === "text" && vals.some(v => typeof v === "string" && /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(v.trim()))) type = "date";
+        const meta = addVar(k, { label, fullQuestion: fromDef || null, section: known.section || f.nome, type, form: f.nome, formSlug: f.slug, source: f.planilha ? "Planilha" : "Epicollect", pii: !!known.pii || piiGuess, hide: !!known.hide, unit: known.unit || "", raw: true, key: k });
         if (type === "cat") meta.levelsOrder = known.order || null; if (opts.types && opts.types[k]) meta.typeOverride = true;
         if (type === "cat" || type === "multi") {
           const flat = type === "multi" ? vals.flatMap(v => Array.isArray(v) ? v : (v ? [v] : [])) : vals.filter(v => typeof v === "string");
@@ -218,9 +286,11 @@
     };
     const has = k => !!vars[k];
     const P = "part";
-    // data da avaliação e idade
+    // data da avaliação e idade (formulários do laboratório ou, em planilhas, colunas de data reconhecidas pelo nome)
+    const dataGen = !has("2_Data_da_avaliao") ? tables.part.vars.find(k => vars[k].type === "date" && !/nasc/i.test(deacc(vars[k].label)) && /avalia|coleta|consulta|atendimento|data/i.test(deacc(vars[k].label))) : null;
+    const nascGen = !has("6_Data_de_nascimento") ? tables.part.vars.find(k => vars[k].type === "date" && /nasc/i.test(deacc(vars[k].label)) && !/respons|m[aã]e|pai/i.test(deacc(vars[k].label))) : null;
     der("d_data", { label: "Data da avaliação", type: "date", section: "Identificação", desc: "Data informada na ficha; se vazia ou impossível (antes de 2010 ou depois do envio ao Epicollect), a data do registro no Epicollect." }, P, r => {
-      const reg = r._created ? r._created.slice(0, 10) : null, d = r["2_Data_da_avaliao"];
+      const reg = r._created ? r._created.slice(0, 10) : null, d = r["2_Data_da_avaliao"] || (dataGen ? r[dataGen] : null);
       if (d && reg && (d < "2010-01-01" || Date.parse(d) > Date.parse(reg) + 3 * 864e5)) { Q("erro", "2_Data_da_avaliao", r._id, "Data da avaliação impossível; usada a data do registro (" + reg.split("-").reverse().join("/") + ")", d.split("-").reverse().join("/")); return reg; }
       return d || reg;
     });
@@ -258,10 +328,11 @@
       const x = regField ? r[regField] : null; if (!x) return null; const k = D.key(x); return REG.find(g => D.key(g).startsWith(k.slice(0, 8))) || x;
     });
     der("d_registrador", { label: "Registrador no Epicollect (pseudônimo)", type: "cat", section: "Identificação", desc: "E-mail de quem enviou a ficha, trocado por um código." }, P, r => evalPseudo.get(r._by) || null);
-    if (has("6_Data_de_nascimento")) {
+    const NASC = has("6_Data_de_nascimento") ? "6_Data_de_nascimento" : nascGen;
+    if (NASC) {
       der("d_idade", { label: "Idade (anos)", type: "num", unit: "anos", section: "Identificação", desc: "Data da avaliação − data de nascimento." }, P, r => {
-        if (!r["6_Data_de_nascimento"] || !r.d_data) return null; const a = years(r["6_Data_de_nascimento"], r.d_data);
-        if (a < 0 || a > 100) { Q("erro", "6_Data_de_nascimento", r._id, "Idade calculada impossível (data de nascimento ou da avaliação errada)", a.toFixed(1)); return null; } return +a.toFixed(2);
+        if (!r[NASC] || !r.d_data) return null; const a = years(r[NASC], r.d_data);
+        if (a < 0 || a > 100) { Q("erro", NASC, r._id, "Idade calculada impossível (data de nascimento ou da avaliação errada)", a.toFixed(1)); return null; } return +a.toFixed(2);
       });
       der("d_faixa", { label: "Faixa etária", type: "cat", section: "Identificação", ordinal: true, levels: ["0–2 anos", "3–5 anos", "6–11 anos", "12–17 anos", "18 anos ou mais"] }, P, r => {
         const a = r.d_idade; if (a == null) return null; return a < 3 ? "0–2 anos" : a < 6 ? "3–5 anos" : a < 12 ? "6–11 anos" : a < 18 ? "12–17 anos" : "18 anos ou mais";
